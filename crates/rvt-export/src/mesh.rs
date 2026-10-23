@@ -372,10 +372,32 @@ pub fn scene(doc: &Document) -> Scene {
         let t = f.thickness.filter(|t| *t > 0.0).unwrap_or(0.08);
         slab(batch!("Ceilings", [0.93, 0.92, 0.90]), &f.curves, f.top_z, t, false);
     }
-    for r in doc.roofs().into_iter().filter(|r| r.kind == "footprint") {
+    for r in doc.roofs() {
         let t = r.thickness.filter(|t| *t > 0.0).unwrap_or(0.75);
         let curves: Vec<Curve> = r.edges.iter().map(|e| e.curve.clone()).collect();
-        slab(batch!("Roofs", [0.60, 0.30, 0.18]), &curves, r.base_z, t, false);
+        if r.kind == "footprint" {
+            slab(batch!("Roofs", [0.60, 0.30, 0.18]), &curves, r.base_z, t, false);
+            continue;
+        }
+        // Extrusion roof (§32, steps 1359–1360): the profile lies in a vertical sketch plane with
+        // normal N; each profile segment becomes a plate of the roof thickness (hanging below the
+        // profile) swept along N from `end` to `start`.
+        let (Some(Some(n)), Some(s0), Some(s1)) = (r.normal, r.end, r.start) else { continue };
+        let Some(n) = unit(n) else { continue };
+        let b = batch!("Roofs", [0.60, 0.30, 0.18]);
+        let (o0, o1) = (mul(n, s0), mul(n, s1));
+        for c in &curves {
+            for s in sample(c).windows(2) {
+                let (p, q) = (s[0], s[1]);
+                let Some(m) = unit(cross(n, sub(q, p))) else { continue };
+                let m = if m[2] > 0.0 { mul(m, -t) } else { mul(m, t) };
+                let (pb, qb) = (add(p, m), add(q, m));
+                b.hexa(
+                    [add(pb, o0), add(qb, o0), add(qb, o1), add(pb, o1)],
+                    [add(p, o0), add(q, o0), add(q, o1), add(p, o1)],
+                );
+            }
+        }
     }
 
     let segs: Vec<Segment> = doc.segments();
