@@ -50,6 +50,8 @@ pub(crate) fn levels(ch: &Chain, level_types: &HashSet<u64>) -> Vec<Level> {
     let mut lt: HashSet<u64> = ch.elements.iter().filter(|x| x.tag.is_some() && x.tag == ltt).map(|x| x.id).collect();
     lt.extend(level_types);
 
+    let ft = vtag(ch.version, TAG_FAMILY);
+    let fams: HashSet<u64> = if bits32 { ch.elements.iter().filter(|x| x.tag.is_some() && x.tag == ft).map(|x| x.id).collect() } else { HashSet::new() };
     let mut out = Vec::new();
     for e in ch.elements.iter().filter(|e| e.tag == Some(tag)) {
         let bd = ch.body(e);
@@ -58,6 +60,10 @@ pub(crate) fn levels(ch: &Chain, level_types: &HashSet<u64>) -> Vec<Level> {
             if !f.is_empty() && (40..(l.saturating_sub(3)).min(90)).any(|o| i32_at(bd, o) >= 0 && f.contains(&(i32_at(bd, o) as u64))) {
                 continue;
             }
+        }
+        // step 2195: 32-bit level owned by a family = reference level of an embedded family document
+        if bits32 && e.owner32.is_some_and(|o| o != -1 && fams.contains(&(o as u64))) {
+            continue;
         }
         let mut name = None;
         for o in (if bits32 { 90 } else { 120 })..(l.saturating_sub(4)).min(200) {
