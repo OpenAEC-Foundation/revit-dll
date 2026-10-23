@@ -33,7 +33,8 @@ A port counts as done only when the Rust output matches the reference export:
 | Type catalogue with compound structures (§25: wall/floor/roof/ceiling types, layers, materials, core) | **done** | 111 files, 1487 types, 0 mismatches |
 | Curve tables (§7: lines, arcs, ellipses, full circles; 64-bit and 32-bit) | **done** | via floors/ceilings/roofs |
 | Floors, ceilings (§31) and roofs (§32: footprint, extrusion, edge slopes) | **done** | 111 files: 161 floors, 395 ceilings, 31 roofs, 0 mismatches |
-| Family instances (§13 placement, §16 type, levels, schedule/reference level, work-plane host, connectors; 2014 document chain merge) | **done** (fam_values, fam_flags, system still open) | 111 files, 40 084 instances, 0 mismatches |
+| Family instances (§13 placement, §16 type, levels, schedule/reference level, work-plane host, connectors, MEP system; 2014 document chain merge) | **done** (fam_values, fam_flags still open) | 111 files, 41 008 instances, 0 mismatches |
+| MEP systems (§15.5) and straight segments (§15.1: ducts, pipes, trays, conduits; size, round, type, system, level) | **done** | 111 files: 2182 segments; systems 103/103 files equal |
 | Other semantic readers (≈ 200 lists of the reference export) | not started | — |
 | Query API: `Document::open`, `info`, `element(id)`, `elements()`, `elements_in_category`, `levels`, `walls` | **started** | CLI `rvt info/element/category/levels` |
 | Exporters | not started | — |

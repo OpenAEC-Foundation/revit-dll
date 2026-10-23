@@ -269,4 +269,35 @@ pub struct Instance {
     /// Host of the work plane (ceiling, curtain panel, …) for work-plane based instances (step 2045).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub work_plane_host: Option<i64>,
+    /// MEP system of duct and pipe terminals/accessories (present, possibly null, for those categories).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system: Option<Option<u64>>,
+}
+
+/// Straight MEP curve segment: duct, pipe, cable tray or conduit (§15.1, steps 240, 1132,
+/// 1330, 1467, 1469, 1818).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Segment {
+    pub id: u64,
+    pub p0: [f64; 3],
+    pub p1: [f64; 3],
+    /// Width (diameter for round segments).
+    pub width: f64,
+    pub height: f64,
+    pub round: bool,
+    /// MEPCurveType id.
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub segment_type: Option<i64>,
+    /// MEP system id, if exactly one is referenced.
+    pub system: Option<u64>,
+    /// Reference level (steps 2006/2011/2159).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<i64>,
+}
+
+/// MEP system (§15.5): id and name.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct MepSystem {
+    pub id: u64,
+    pub name: Option<String>,
 }

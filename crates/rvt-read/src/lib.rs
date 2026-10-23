@@ -4,6 +4,7 @@ mod compound;
 mod curves;
 mod instances;
 mod levels;
+mod mep;
 mod slabs;
 mod util;
 mod walls;
@@ -11,7 +12,7 @@ mod walls;
 use std::collections::{HashMap, HashSet};
 
 use rvt_core::{read_partitions, vtag, Cfb, Chain, Element, Partition};
-use rvt_model::{CompoundType, DocumentInfo, ElementInfo, Floor, Instance, Level, Roof, Wall};
+use rvt_model::{CompoundType, DocumentInfo, ElementInfo, Floor, Instance, Level, MepSystem, Roof, Segment, Wall};
 
 pub use rvt_core::{Error, Result};
 
@@ -28,6 +29,8 @@ const CAT_PHASES: i32 = -2000112;
 const CAT_VIEWS: i32 = -2000279;
 const CAT_PROJECT_INFO: i32 = -2003101;
 const CAT_LEVELS: i32 = -2000240;
+const CAT_DUCT_TERMINALS: i32 = -2008013;
+const CAT_PIPE_ACCESSORIES: i32 = -2008010;
 
 /// An opened `.rvt` file.
 pub struct Document {
@@ -53,6 +56,8 @@ pub struct Document {
     slab_cat_ids: HashMap<i32, HashSet<i64>>,
     /// Compound type id -> total thickness (step 426, reference `gtw`).
     type_width: HashMap<i64, f64>,
+    /// MEP systems over chain 0 of all partitions (step 241), in file order.
+    systems: Vec<MepSystem>,
 }
 
 impl Document {
@@ -124,7 +129,20 @@ impl Document {
             view_owners,
             slab_cat_ids,
             type_width: HashMap::new(),
+            systems: Vec::new(),
         };
+        let mut systems: Vec<MepSystem> = Vec::new();
+        for p in &doc.partitions {
+            if let Some(ch) = p.chains.first().filter(|c| c.bits.is_some()) {
+                for s in mep::system_names(ch) {
+                    match systems.iter_mut().find(|x| x.id == s.id) {
+                        Some(x) => x.name = s.name,
+                        None => systems.push(s),
+                    }
+                }
+            }
+        }
+        doc.systems = systems;
         doc.type_width = doc.compound_types().into_iter().map(|t| (t.id as i64, t.width)).collect();
         let mut level_z = HashMap::new();
         for p in &doc.partitions {
@@ -298,6 +316,12 @@ impl Document {
             note(r.id, Some(r.level));
         }
         instances::work_plane_levels(ch, &mut insts, &host_levels);
+        // §15.5: system of duct and pipe terminals/accessories
+        let sys_ids = self.system_ids();
+        let byid: HashMap<u64, &Element> = ch.elements.iter().map(|e| (e.id, e)).collect();
+        for r in insts.iter_mut().filter(|r| r.cat == CAT_DUCT_TERMINALS || r.cat == CAT_PIPE_ACCESSORIES) {
+            r.system = Some(byid.get(&r.id).and_then(|e| mep::system_of(ch, e, &sys_ids)));
+        }
         if ch.bits == Some(32) {
             insts.retain(|r| self.owner32.get(&r.id).copied().unwrap_or(-1) == -1);
         }
@@ -321,6 +345,25 @@ impl Document {
             }
         }
         out
+    }
+
+    /// MEP systems (id and name) of the file.
+    pub fn systems(&self) -> &[MepSystem] {
+        &self.systems
+    }
+
+    fn system_ids(&self) -> HashSet<u64> {
+        self.systems.iter().map(|s| s.id).collect()
+    }
+
+    /// Straight MEP segments (ducts, pipes, cable trays, conduits) per project chain.
+    pub fn segments_by_chain(&self) -> Vec<(String, usize, Vec<Segment>)> {
+        let sys = self.system_ids();
+        self.project_chains().map(|(p, ch)| (p.stream.clone(), ch.index, mep::segments(ch, &sys))).collect()
+    }
+
+    pub fn segments(&self) -> Vec<Segment> {
+        self.segments_by_chain().into_iter().flat_map(|(_, _, s)| s).collect()
     }
 
     pub fn instances(&self) -> Vec<Instance> {

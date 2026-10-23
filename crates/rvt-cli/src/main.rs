@@ -10,6 +10,7 @@ const USAGE: &str = "usage:
   rvt walls <file.rvt>                 walls per project chain
   rvt floors|ceilings|roofs <file.rvt> slabs per project chain, with sketch curves
   rvt instances <file.rvt>             family instances (placement, type, levels, connectors)
+  rvt segments <file.rvt>              MEP segments (ducts, pipes, trays, conduits) and systems
   rvt wall_types <file.rvt>            type catalogue with layers (wall/floor/roof/ceiling types)
   rvt elements <file.rvt>              element tables per partition and chain
 Each command prints JSON; add `-o out.json` to write a file instead.";
@@ -70,6 +71,12 @@ fn run(args: &[String]) -> Result<Value, String> {
         "wall_types" => {
             let doc = rvt_read::Document::open(path).map_err(err)?;
             Ok(json!({"wall_types": doc.compound_types()}))
+        }
+        "segments" => {
+            let doc = rvt_read::Document::open(path).map_err(err)?;
+            let chains: Vec<Value> =
+                doc.segments_by_chain().into_iter().map(|(s, i, v)| json!({"stream": s, "index": i, "segments": v})).collect();
+            Ok(json!({"chains": chains, "systems": doc.systems()}))
         }
         "instances" => {
             let doc = rvt_read::Document::open(path).map_err(err)?;

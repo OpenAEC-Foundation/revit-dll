@@ -233,6 +233,7 @@ fn instance(ch: &Chain, e: &Element, lk: &Lookups) -> Instance {
         reference_level,
         reference_level_source,
         work_plane_host: None,
+        system: None,
     }
 }
 
