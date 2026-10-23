@@ -25,11 +25,11 @@ fn pack(bits32: bool, v: i64) -> Vec<u8> {
 }
 
 /// Railing Height = f64 before BIP −1008602 (step 440); top rail `f64 height | type` before
-/// BIP −1008629 (64-bit @−45/−37, 32-bit @−49/−17; steps 443–444, 1373).
+/// BIP −1008629 (64-bit @−45/−37, 32-bit @−49/−41; steps 443–444, 1373, 2205).
 pub(crate) fn rail_type_info(bd: &[u8], bits32: bool) -> RailingTypeInfo {
     let height = find(bd, &pack(bits32, BIP_RAILING_HEIGHT)).filter(|&k| k >= 8).map(|k| f64_at(bd, k - 8));
     let (toprail_height, toprail_type) = match find(bd, &pack(bits32, BIP_TOP_RAIL)) {
-        Some(a) if bits32 && a >= 49 => (Some(f64_at(bd, a - 49)), Some(i32_at(bd, a - 17) as i64)),
+        Some(a) if bits32 && a >= 49 => (Some(f64_at(bd, a - 49)), Some(i32_at(bd, a - 41) as i64)),
         Some(a) if !bits32 && a >= 45 => (Some(f64_at(bd, a - 45)), Some(i64_at(bd, a - 37))),
         _ => (None, None),
     };
