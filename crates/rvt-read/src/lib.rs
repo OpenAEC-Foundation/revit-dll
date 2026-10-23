@@ -62,6 +62,22 @@ pub struct Document {
 }
 
 impl Document {
+    /// Opens a file from memory (for example bytes received over IPC).
+    pub fn from_bytes(data: Vec<u8>) -> Result<Self> {
+        let cfb = Cfb::from_bytes(data)?;
+        Ok(Self::from_partitions(read_partitions(&cfb)?))
+    }
+
+    /// Elevation of a level (feet), over chain 0 of all partitions.
+    pub fn level_elevation(&self, level: i64) -> Option<f64> {
+        self.level_z.get(&level).copied()
+    }
+
+    /// Total thickness of a compound type (wall/floor/roof/ceiling type), in feet.
+    pub fn type_thickness(&self, type_id: i64) -> Option<f64> {
+        self.type_width.get(&type_id).copied()
+    }
+
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
         let cfb = Cfb::open(path)?;
         Ok(Self::from_partitions(read_partitions(&cfb)?))

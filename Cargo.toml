@@ -22,7 +22,7 @@ serde_json = "1.0"
 rvt-core = { path = "crates/rvt-core" }
 rvt-model = { path = "crates/rvt-model" }
 rvt-read = { path = "crates/rvt-read" }
-rvt-export = { path = "crates/rvt-export" }
+rvt-export = { path = "crates/rvt-export", default-features = false }
 
 [profile.release]
 lto = "thin"

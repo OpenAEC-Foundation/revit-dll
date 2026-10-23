@@ -13,6 +13,7 @@ const USAGE: &str = "usage:
   rvt segments <file.rvt>              MEP segments (ducts, pipes, trays, conduits) and systems
   rvt wall_types <file.rvt>            type catalogue with layers (wall/floor/roof/ceiling types)
   rvt elements <file.rvt>              element tables per partition and chain
+  rvt mesh <file.rvt> [scene.bin]      viewer meshes per category (summary; optional binary)
 Each command prints JSON; add `-o out.json` to write a file instead.";
 
 /// Element tables per partition and chain, in the shape of the reference export
@@ -71,6 +72,21 @@ fn run(args: &[String]) -> Result<Value, String> {
         "wall_types" => {
             let doc = rvt_read::Document::open(path).map_err(err)?;
             Ok(json!({"wall_types": doc.compound_types()}))
+        }
+        "mesh" => {
+            let doc = rvt_read::Document::open(path).map_err(err)?;
+            let t = std::time::Instant::now();
+            let scene = rvt_export::mesh::scene(&doc);
+            let ms = t.elapsed().as_millis();
+            if let Some(bin) = args.get(2) {
+                std::fs::write(bin, rvt_export::mesh::encode(&scene)).map_err(|e| e.to_string())?;
+            }
+            let batches: Vec<Value> = scene
+                .batches
+                .iter()
+                .map(|b| json!({"name": b.name, "vertices": b.positions.len() / 3, "triangles": b.indices.len() / 3}))
+                .collect();
+            Ok(json!({"batches": batches, "bounds_min": scene.bounds_min, "bounds_max": scene.bounds_max, "mesh_ms": ms}))
         }
         "segments" => {
             let doc = rvt_read::Document::open(path).map_err(err)?;
