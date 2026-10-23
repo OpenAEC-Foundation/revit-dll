@@ -216,6 +216,12 @@ fn instance(ch: &Chain, e: &Element, lk: &Lookups) -> Instance {
             if let Some(o) = (k..l - w - k).find(|&o| bd[o - k..o] == ff[..] && bd[o + w..o + w + k] == ff[..] && lk.levels.contains(&lk.rd(bd, o))) {
                 reference_level = Some(lk.rd(bd, o));
                 reference_level_source = Some("ff_anchor");
+            } else if ch.version == Some(2014) && l >= 16 {
+                // step 2193: 2014 lacks the second ff block: `ff×8 | i32 level | u32 5`
+                if let Some(o) = (8..l - 8).find(|&o| bd[o - 8..o] == [0xff; 8] && u32_at(bd, o + 4) == 5 && lk.levels.contains(&(i32_at(bd, o) as i64))) {
+                    reference_level = Some(i32_at(bd, o) as i64);
+                    reference_level_source = Some("ff_anchor");
+                }
             }
         }
     }
