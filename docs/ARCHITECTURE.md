@@ -75,9 +75,9 @@ without bindings for every struct.
 
 ## Open decisions
 
-- **DWG output.** DWG is a closed format. Options: (a) write DXF only (open and readable by
-  every CAD program); (b) write DWG ourselves from a clean-room DWG specification (large
-  project, separate legal check); (c) link a third-party DWG writer (licence: the open-source
-  one is GPL-3, the commercial one is paid and closed). Recommendation: (a) now, decide on (b)
-  or (c) later.
+- **DXF and DWG output — decided 2026-10-23: [`acadrust`](https://crates.io/crates/acadrust)**
+  (pure Rust, reads and writes DXF ASCII/binary and DWG; MPL-2.0). MPL-2.0 is file-level
+  copyleft: linking it into the proprietary `rvt.dll` is allowed; changes to acadrust's own
+  files must be published under MPL-2.0. `rvt-export` uses it behind the `cad` feature, so
+  there is no separate DXF writer of our own.
 - **Licence of this crate.** Proprietary for now (`publish = false`).

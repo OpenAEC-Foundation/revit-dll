@@ -1,1 +1,1 @@
-//! Writers from the neutral model to IFC, STEP and DXF.
+//! Writers from the neutral model to IFC, STEP, DXF and DWG (DXF/DWG through acadrust).

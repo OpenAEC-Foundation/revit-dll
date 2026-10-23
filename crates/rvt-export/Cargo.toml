@@ -1,6 +1,6 @@
 [package]
 name = "rvt-export"
-description = "Writers from the neutral model to IFC, STEP and DXF"
+description = "Writers from the neutral model to IFC, STEP, DXF and DWG"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,3 +8,8 @@ publish.workspace = true
 
 [dependencies]
 rvt-model.workspace = true
+acadrust = { version = "0.6.6", optional = true, default-features = false }
+
+[features]
+default = ["cad"]
+cad = ["dep:acadrust"]
