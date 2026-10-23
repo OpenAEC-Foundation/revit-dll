@@ -238,14 +238,16 @@ fn instance(ch: &Chain, e: &Element, lk: &Lookups) -> Instance {
 }
 
 /// All family instances (tag 1989) of a chain, with the step 1161 placement of generic annotations.
-pub(crate) fn instances(ch: &Chain) -> Vec<Instance> {
+/// `extra_symbols`: symbol ids of other chains (step 2191: the 2014 document chain's instances
+/// reference symbols in the project chain).
+pub(crate) fn instances(ch: &Chain, extra_symbols: &HashSet<u64>) -> Vec<Instance> {
     let bits32 = ch.bits == Some(32);
     let curtain: HashSet<Option<u16>> = [vtag(ch.version, TAG_MULLION_TYPE), vtag(ch.version, TAG_PANEL_TYPE)].into_iter().collect();
     let sym = vtag(ch.version, TAG_SYMBOL);
     let lk = Lookups {
         bits32,
         w: if bits32 { 4 } else { 8 },
-        symbols: ch.elements.iter().filter(|x| x.tag.is_some() && x.tag == sym).map(|x| x.id).collect(),
+        symbols: ch.elements.iter().filter(|x| x.tag.is_some() && x.tag == sym).map(|x| x.id).chain(extra_symbols.iter().copied()).collect(),
         cat: ch.elements.iter().map(|x| (x.id, x.cat)).collect(),
         byid: ch.elements.iter().map(|x| (x.id, x)).collect(),
         levels: ch.elements.iter().filter(|x| x.cat == CAT_LEVELS).map(|x| x.id as i64).collect(),

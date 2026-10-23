@@ -23,6 +23,7 @@ pub(crate) const TAG_FAMILY: u16 = 1967;
 pub(crate) const TAG_LEVEL: u16 = 2535;
 pub(crate) const TAG_LEVEL_TYPE: u16 = 2536;
 const TAG_HDR: u16 = 765;
+const TAG_SYMBOL: u16 = 2022;
 const TAG_WALL_RECORD: u16 = 3842;
 const CAT_WALLS: i32 = -2000011;
 const CAT_PHASES: i32 = -2000112;
@@ -288,8 +289,8 @@ impl Document {
 
     /// Instances of one chain: placement, type, levels, work-plane levels (step 2045) and, for
     /// 32-bit files, without instances owned by a family (step 2163).
-    fn chain_instances(&self, ch: &Chain) -> Vec<Instance> {
-        let mut insts = instances::instances(ch);
+    fn chain_instances(&self, ch: &Chain, extra_symbols: &HashSet<u64>) -> Vec<Instance> {
+        let mut insts = instances::instances(ch, extra_symbols);
         // step 2045 uses the level of any project record (level, base level or reference level) of this chain
         let lv: HashSet<i64> = ch.elements.iter().filter(|e| e.cat == CAT_LEVELS).map(|e| e.id as i64).collect();
         let mut host_levels: HashMap<u64, i64> = HashMap::new();
@@ -332,10 +333,22 @@ impl Document {
     /// first project chain (step 2179).
     pub fn instances_by_chain(&self) -> Vec<(String, usize, Vec<Instance>)> {
         let mut out: Vec<(String, usize, Vec<Instance>)> =
-            self.project_chains().map(|(p, ch)| (p.stream.clone(), ch.index, self.chain_instances(ch))).collect();
+            self.project_chains().map(|(p, ch)| (p.stream.clone(), ch.index, self.chain_instances(ch, &HashSet::new()))).collect();
         if let Some(first) = out.first_mut() {
             for &(pi, ci) in &self.document {
-                let extra = self.chain_instances(&self.partitions[pi].chains[ci]);
+                let doc = &self.partitions[pi].chains[ci];
+                // step 2191: symbols of the other 32-bit chains 0 of the file
+                let syms: HashSet<u64> = self
+                    .partitions
+                    .iter()
+                    .filter_map(|p| p.chains.first())
+                    .filter(|c| c.bits == Some(32) && !std::ptr::eq(*c, doc))
+                    .flat_map(|c| {
+                        let t = vtag(c.version, TAG_SYMBOL);
+                        c.elements.iter().filter(move |e| e.tag.is_some() && e.tag == t).map(|e| e.id)
+                    })
+                    .collect();
+                let extra = self.chain_instances(doc, &syms);
                 let have: HashSet<u64> = first.2.iter().map(|r| r.id).collect();
                 if first.2.is_empty() {
                     first.2 = extra;
