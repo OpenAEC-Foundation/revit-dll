@@ -269,11 +269,10 @@ fn plan_loops(curves: &[Curve]) -> (Vec<Vec<Vec<[f64; 2]>>>, f64) {
 fn instance_batch(cat: i32) -> (&'static str, [f32; 3]) {
     match cat {
         -2000023 => ("Doors", [0.71, 0.53, 0.35]),
-        -2000014 => ("Windows", [0.55, 0.75, 0.90]),
+        -2000014 => ("Windows", [0.45, 0.70, 0.92]),
         -2000080 | -2001100 => ("Furniture and casework", [0.80, 0.62, 0.40]),
         -2000100 | -2001330 => ("Columns", [0.62, 0.62, 0.66]),
         -2001320 => ("Structural framing", [0.55, 0.55, 0.60]),
-        -2000170 | -2000171 => ("Curtain panels and mullions", [0.62, 0.78, 0.86]),
         -2001160 | -2001040 => ("Plumbing fixtures", [0.85, 0.88, 0.90]),
         -2001140 | -2008013 | -2008010 | -2008016 | -2008055 => ("MEP equipment and terminals", [0.40, 0.65, 0.55]),
         -2001120 => ("Lighting fixtures", [0.96, 0.62, 0.04]),
@@ -310,7 +309,7 @@ pub fn scene(doc: &Document) -> Scene {
             Some(c) => sample(&Curve { id: w.id, kind: "arc", center: Some(c.center), r: Some(c.r), x: Some(c.x), y: Some(c.y), t0: Some(c.t0), t1: Some(c.t1), ..Default::default() }),
             None => vec![w.p0, w.p1],
         };
-        let b = batch!("Walls", [0.84, 0.83, 0.82]);
+        let b = batch!("Walls", [0.90, 0.88, 0.84]);
         for s in line.windows(2) {
             let (a, c) = ([s[0][0], s[0][1], base], [s[1][0], s[1][1], base]);
             let Some(d) = unit(sub(c, a)) else { continue };
@@ -331,7 +330,7 @@ pub fn scene(doc: &Document) -> Scene {
     };
     for f in doc.floors() {
         let t = f.thickness.filter(|t| *t > 0.0).unwrap_or(0.5);
-        slab(batch!("Floors", [0.66, 0.64, 0.62]), &f.curves, f.top_z, t, true);
+        slab(batch!("Floors", [0.62, 0.60, 0.56]), &f.curves, f.top_z, t, true);
     }
     for f in doc.ceilings() {
         let t = f.thickness.filter(|t| *t > 0.0).unwrap_or(0.08);
@@ -340,7 +339,7 @@ pub fn scene(doc: &Document) -> Scene {
     for r in doc.roofs().into_iter().filter(|r| r.kind == "footprint") {
         let t = r.thickness.filter(|t| *t > 0.0).unwrap_or(0.75);
         let curves: Vec<Curve> = r.edges.iter().map(|e| e.curve.clone()).collect();
-        slab(batch!("Roofs", [0.57, 0.25, 0.05]), &curves, r.base_z, t, false);
+        slab(batch!("Roofs", [0.60, 0.30, 0.18]), &curves, r.base_z, t, false);
     }
 
     let segs: Vec<Segment> = doc.segments();
@@ -351,7 +350,9 @@ pub fn scene(doc: &Document) -> Scene {
     }
 
     let insts: Vec<Instance> = doc.instances();
-    for i in insts.iter().filter(|i| i.scale.is_none() && i.origin.is_some()) {
+    // Curtain panels and mullions are skipped: their stored boxes span the whole curtain wall, which
+    // is already drawn as a wall.
+    for i in insts.iter().filter(|i| i.scale.is_none() && i.origin.is_some() && !matches!(i.cat, -2000170 | -2000171)) {
         let Some(e) = doc.element(i.id) else { continue };
         if e.view.is_some_and(|v| v != -1) {
             continue; // view-specific (annotation)
@@ -359,6 +360,11 @@ pub fn scene(doc: &Document) -> Scene {
         let Some(bb) = e.bbox else { continue };
         let ext = [bb[3] - bb[0], bb[4] - bb[1], bb[5] - bb[2]];
         if ext.iter().any(|v| !(v.is_finite() && *v >= 0.0 && *v < 1e4)) || ext.iter().all(|v| *v < 1e-6) {
+            continue;
+        }
+        // A stored box that is large in all three directions (> 3 m) covers more than the family
+        // itself (site, massing or nested content); drawing it hides the building.
+        if ext.iter().all(|v| *v * FT > 3.0) {
             continue;
         }
         let (name, color) = instance_batch(i.cat);
