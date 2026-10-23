@@ -334,3 +334,23 @@ pub struct RailingTypeInfo {
     pub toprail_height: Option<f64>,
     pub toprail_type: Option<i64>,
 }
+
+/// Component stairs (§33, steps 401–405, 722, 1328, 1453–1454, 1489–1490). Lengths in feet.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Stair {
+    pub id: u64,
+    pub riser: f64,
+    pub tread: f64,
+    pub base_level: i64,
+    pub base_offset: f64,
+    pub top_level: i64,
+    pub top_offset: f64,
+    /// Level difference (top level + offset − base level − offset), or the desired height when a
+    /// level is unknown (step 722).
+    pub height: f64,
+    pub desired_height: f64,
+    pub risers: i64,
+    pub base_z: Option<f64>,
+    /// StairsRun ids (tag 4039) whose body references the stairs.
+    pub runs: Vec<u64>,
+}

@@ -36,6 +36,7 @@ A port counts as done only when the Rust output matches the reference export:
 | Family instances (§13 placement, §16 type, levels, schedule/reference level, work-plane host, connectors, MEP system; 2014 document chain merge) | **done** (fam_values, fam_flags still open) | 111 files, 41 008 instances, 0 mismatches |
 | MEP systems (§15.5) and straight segments (§15.1: ducts, pipes, trays, conduits; size, round, type, system, level) | **done** | 111 files: 2182 segments; systems 103/103 files equal |
 | Railings (§35: path, type, host, placement offset, level, height, top rail height/type; `top_rail` sub-record still open) | **done** (core) | 112 files, 246 railings, 0 mismatches |
+| Stairs (§33: riser, tread, base/top level and offset, height, risers, base z, runs; 2014–2017 layout; `type` and run geometry still open) | **done** (core) | 112 files, 39 stairs, 0 mismatches |
 | Other semantic readers (≈ 200 lists of the reference export) | not started | — |
 | Query API: `Document::open`, `info`, `element(id)`, `elements()`, `elements_in_category`, `levels`, `walls` | **started** | CLI `rvt info/element/category/levels` |
 | Exporters | not started | — |

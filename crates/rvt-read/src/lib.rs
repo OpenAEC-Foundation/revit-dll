@@ -7,13 +7,14 @@ mod levels;
 mod mep;
 mod railings;
 mod slabs;
+mod stairs;
 mod util;
 mod walls;
 
 use std::collections::{HashMap, HashSet};
 
 use rvt_core::{read_partitions, vtag, Cfb, Chain, Element, Partition};
-use rvt_model::{CompoundType, DocumentInfo, ElementInfo, Floor, Instance, Level, MepSystem, Railing, RailingTypeInfo, Roof, Segment, Wall};
+use rvt_model::{CompoundType, DocumentInfo, ElementInfo, Floor, Instance, Level, MepSystem, Railing, RailingTypeInfo, Roof, Segment, Stair, Wall};
 
 pub use rvt_core::{Error, Result};
 
@@ -394,6 +395,25 @@ impl Document {
             }
         }
         out
+    }
+
+    /// Component stairs per project chain (§33); the 2014 document chain's stairs are merged into
+    /// the first project chain by id (step 2179).
+    pub fn stairs_by_chain(&self) -> Vec<(String, usize, Vec<Stair>)> {
+        let mut out: Vec<(String, usize, Vec<Stair>)> =
+            self.project_chains().map(|(p, ch)| (p.stream.clone(), ch.index, stairs::stairs(ch, &self.level_z))).collect();
+        if let Some(first) = out.first_mut() {
+            for &(pi, ci) in &self.document {
+                let extra = stairs::stairs(&self.partitions[pi].chains[ci], &self.level_z);
+                let have: HashSet<u64> = first.2.iter().map(|r| r.id).collect();
+                first.2.extend(extra.into_iter().filter(|r| !have.contains(&r.id)));
+            }
+        }
+        out
+    }
+
+    pub fn stairs(&self) -> Vec<Stair> {
+        self.stairs_by_chain().into_iter().flat_map(|(_, _, s)| s).collect()
     }
 
     pub fn railings(&self) -> Vec<Railing> {
