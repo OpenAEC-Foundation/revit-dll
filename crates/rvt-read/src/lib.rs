@@ -412,6 +412,24 @@ impl Document {
         out
     }
 
+    /// Stairs runs per project chain (step 722: width, base and top elevation).
+    pub fn stairs_runs_by_chain(&self) -> Vec<(String, usize, Vec<rvt_model::StairsRun>)> {
+        let mut out: Vec<(String, usize, Vec<rvt_model::StairsRun>)> =
+            self.project_chains().map(|(p, ch)| (p.stream.clone(), ch.index, stairs::stairs_runs(ch))).collect();
+        if let Some(first) = out.first_mut() {
+            for &(pi, ci) in &self.document {
+                let extra = stairs::stairs_runs(&self.partitions[pi].chains[ci]);
+                let have: HashSet<u64> = first.2.iter().map(|r| r.id).collect();
+                first.2.extend(extra.into_iter().filter(|r| !have.contains(&r.id)));
+            }
+        }
+        out
+    }
+
+    pub fn stairs_runs(&self) -> Vec<rvt_model::StairsRun> {
+        self.stairs_runs_by_chain().into_iter().flat_map(|(_, _, s)| s).collect()
+    }
+
     pub fn stairs(&self) -> Vec<Stair> {
         self.stairs_by_chain().into_iter().flat_map(|(_, _, s)| s).collect()
     }

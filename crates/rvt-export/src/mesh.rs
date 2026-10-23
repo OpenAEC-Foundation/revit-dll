@@ -267,11 +267,11 @@ fn plan_loops(curves: &[Curve]) -> (Vec<Vec<Vec<[f64; 2]>>>, f64) {
 }
 
 /// Walk path of each run of a stair (sketch "path" lines, else the cached path), in run order.
-fn run_paths(st: &Stair) -> Vec<Vec<P3>> {
+fn run_paths(st: &Stair) -> Vec<(u64, Vec<P3>)> {
     st.runs
         .iter()
-        .filter_map(|r| st.run_geometry.get(&r.to_string()))
-        .map(|g| {
+        .filter_map(|r| st.run_geometry.get(&r.to_string()).map(|g| (*r, g)))
+        .map(|(r, g)| {
             let mut pts: Vec<P3> = Vec::new();
             let mut push = |q: Vec<P3>| {
                 for p in q {
@@ -292,9 +292,9 @@ fn run_paths(st: &Stair) -> Vec<Vec<P3>> {
                     }
                 }
             }
-            pts
+            (r, pts)
         })
-        .filter(|p| p.len() >= 2)
+        .filter(|(_, p)| p.len() >= 2)
         .collect()
 }
 
@@ -389,9 +389,11 @@ pub fn scene(doc: &Document) -> Scene {
     // 3 ft apart. The base is the railing's level plus its base offset when it has a level
     // (steps 2200, 2202: the path z is sometimes 0 for a railing on an upper level); otherwise
     // the path z.
-    // Stairs (§33): per run, one block per tread along the walk path, each a riser high, 3 ft wide
-    // (the run width is not read yet); rising by one riser per tread from the stair base.
+    // Stairs (§33): per run, one block per tread along the walk path, each a riser high and as wide
+    // as the run (step 722; 3 ft if unknown), rising by one riser per tread from the run's base
+    // elevation (absolute, step 2211), or from the stair base counted over the runs.
     let stairs = doc.stairs();
+    let runs: std::collections::HashMap<u64, rvt_model::StairsRun> = doc.stairs_runs().into_iter().map(|r| (r.id, r)).collect();
     for st in &stairs {
         let Some(zb) = st.base_z else { continue };
         if !(st.riser > 0.0 && st.tread > 0.0) {
@@ -399,7 +401,12 @@ pub fn scene(doc: &Document) -> Scene {
         }
         let b = batch!("Stairs", [0.70, 0.66, 0.60]);
         let mut k = 0usize;
-        for path in run_paths(st) {
+        for (rid, path) in run_paths(st) {
+            let run = runs.get(&rid).filter(|r| r.width > 0.0 && r.width < 50.0 && r.base_elevation.is_finite());
+            let half = run.map_or(1.5, |r| r.width / 2.0);
+            if let Some(r) = run {
+                k = ((r.base_elevation - zb) / st.riser).round().max(0.0) as usize;
+            }
             let len = polyline_len(&path);
             let n = ((len / st.tread).round() as usize).max(1);
             // points at equal steps along the path
@@ -422,7 +429,7 @@ pub fn scene(doc: &Document) -> Scene {
                 let (a, c) = (at(i as f64 / n as f64), at((i + 1) as f64 / n as f64));
                 let z0 = zb + st.riser * k as f64;
                 let Some(dir) = unit(sub([c[0], c[1], 0.0], [a[0], a[1], 0.0])) else { continue };
-                let w = mul([-dir[1], dir[0], 0.0], 1.5);
+                let w = mul([-dir[1], dir[0], 0.0], half);
                 let (a, c) = ([a[0], a[1], z0], [c[0], c[1], z0]);
                 let (a0, a1, c0, c1) = (sub(a, w), add(a, w), sub(c, w), add(c, w));
                 let up = [0.0, 0.0, st.riser];
@@ -451,12 +458,30 @@ pub fn scene(doc: &Document) -> Scene {
         // step 2207: a stair railing rises from the stair base at the end nearest a run start (p0)
         // to the stair top at the other end, linearly along the path
         if let Some(st) = r.host.and_then(|h| stair_by_id.get(&(h as u64))) {
-            let p0s: Vec<P3> = run_paths(st).iter().map(|p| p[0]).collect();
+            let rp = run_paths(st);
+            let p0s: Vec<P3> = rp.iter().map(|(_, p)| p[0]).collect();
             let all: Vec<P3> = polys.iter().flatten().copied().collect();
-            if let (Some(zb), Some(&first), Some(&last)) = (st.base_z, all.first(), all.last()) {
+            if let (Some(zb0), Some(&first), Some(&last)) = (st.base_z, all.first(), all.last()) {
                 if !p0s.is_empty() && st.height > 0.0 {
-                    let d = |a: P3| p0s.iter().map(|q| norm(sub([a[0], a[1], 0.0], [q[0], q[1], 0.0]))).fold(f64::INFINITY, f64::min);
+                    let flat = |a: P3, q: P3| norm(sub([a[0], a[1], 0.0], [q[0], q[1], 0.0]));
+                    let d = |a: P3| p0s.iter().map(|q| flat(a, *q)).fold(f64::INFINITY, f64::min);
                     let low_first = d(first) <= d(last);
+                    let (lo_pt, hi_pt) = if low_first { (first, last) } else { (last, first) };
+                    // step 2211: a railing along one run of a multi-run stair spans that run only:
+                    // base of the run starting nearest the low end, top of the run ending nearest
+                    // the high end
+                    let nearest = |pt: P3, start: bool| {
+                        rp.iter()
+                            .min_by(|a, b| {
+                                let ka = if start { a.1[0] } else { *a.1.last().expect("non-empty") };
+                                let kb = if start { b.1[0] } else { *b.1.last().expect("non-empty") };
+                                flat(pt, ka).total_cmp(&flat(pt, kb))
+                            })
+                            .and_then(|(r, _)| runs.get(r))
+                    };
+                    let zb = nearest(lo_pt, true).map_or(zb0, |r| r.base_elevation);
+                    let zt = nearest(hi_pt, false).map_or(zb0 + st.height, |r| r.top_elevation);
+                    let rise = if zt > zb { zt - zb } else { st.height };
                     let total: f64 = polys.iter().map(|p| polyline_len(p)).sum();
                     let mut acc = 0.0;
                     for poly in polys.iter_mut() {
@@ -467,7 +492,7 @@ pub fn scene(doc: &Document) -> Scene {
                             }
                             prev = Some(*p);
                             let f = if total > 0.0 { acc / total } else { 0.0 };
-                            p[2] = zb + st.height * if low_first { f } else { 1.0 - f };
+                            p[2] = zb + rise * if low_first { f } else { 1.0 - f };
                         }
                     }
                 }

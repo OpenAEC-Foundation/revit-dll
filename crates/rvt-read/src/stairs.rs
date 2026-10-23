@@ -293,3 +293,45 @@ pub(crate) fn stairs(ch: &Chain, level_z: &HashMap<i64, f64>) -> Vec<Stair> {
     }
     out
 }
+
+/// Step 722: stairs runs (tag 4039): after the first stairs id S, the marker
+/// `ffffffff k ffffffff k` (k = tag 1065; step 723) with `u32 n | n × (u32, u32)`, then f64 base,
+/// f64 top, 16 zero bytes, f64 width (step 1362); fallback base/top @S+77/85, width @S+109 or
+/// @marker+64.
+pub(crate) fn stairs_runs(ch: &Chain) -> Vec<rvt_model::StairsRun> {
+    let bits32 = ch.bits == Some(32);
+    let st_tag = vtag(ch.version, TAG_STAIRS);
+    let st: HashSet<i64> = ch.elements.iter().filter(|e| e.tag.is_some() && e.tag == st_tag).map(|e| e.id as i64).collect();
+    let run_tag = vtag(ch.version, TAG_RUN);
+    let marker: Option<Vec<u8>> = vtag(ch.version, TAG_MARKER).map(|k| {
+        let mut s = vec![0xff; 4];
+        s.extend_from_slice(&k.to_le_bytes());
+        s.extend_from_slice(&[0xff; 4]);
+        s.extend_from_slice(&k.to_le_bytes());
+        s
+    });
+    let q = |b: &[u8], o: usize| if bits32 { i32_at(b, o) as i64 } else { i64_at(b, o) };
+    let mut out = Vec::new();
+    for e in ch.elements.iter().filter(|e| e.tag.is_some() && e.tag == run_tag) {
+        let bd = ch.body(e);
+        let lim = bd.len().saturating_sub(8).min(20000);
+        let Some(s) = (0..lim).find(|&o| st.contains(&q(bd, o))) else { continue };
+        if s + 117 > bd.len() {
+            continue;
+        }
+        let (mut b, mut t, mut w) = (f64_at(bd, s + 77), f64_at(bd, s + 85), f64_at(bd, s + 109));
+        if let Some(m) = marker.as_ref().and_then(|mk| find(&bd[s..], mk).map(|x| x + s)) {
+            if m + 72 <= bd.len() {
+                w = f64_at(bd, m + 64);
+                let n = crate::util::u32_at(bd, m + 12) as usize;
+                if n < 1000 && m + 56 + 8 * n <= bd.len() && bd[m + 32 + 8 * n..m + 48 + 8 * n].iter().all(|&x| x == 0) {
+                    w = f64_at(bd, m + 48 + 8 * n);
+                    b = f64_at(bd, m + 16 + 8 * n);
+                    t = f64_at(bd, m + 24 + 8 * n);
+                }
+            }
+        }
+        out.push(rvt_model::StairsRun { id: e.id, stairs: q(bd, s), width: w, base_elevation: b, top_elevation: t });
+    }
+    out
+}

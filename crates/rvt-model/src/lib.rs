@@ -396,3 +396,13 @@ pub struct PathSegment {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub points: Option<Vec<[f64; 3]>>,
 }
+
+/// Stairs run (tag 4039, step 722, 723, 1361–1362): owning stairs, width and base/top elevation.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct StairsRun {
+    pub id: u64,
+    pub stairs: i64,
+    pub width: f64,
+    pub base_elevation: f64,
+    pub top_elevation: f64,
+}
