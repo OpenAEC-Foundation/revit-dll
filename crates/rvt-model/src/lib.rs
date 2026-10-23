@@ -316,6 +316,9 @@ pub struct Railing {
     pub placement_offset: Option<f64>,
     /// Base level.
     pub level: Option<i64>,
+    /// Offset of the base from the level (feet; step 2202), when the type anchor was found.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_offset: Option<f64>,
     /// Path curves (feet, model coordinates).
     pub path: Vec<Curve>,
     /// Values of the RailingType; present when the type was found.

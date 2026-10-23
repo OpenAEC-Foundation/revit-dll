@@ -79,6 +79,7 @@ pub(crate) fn railings(ch: &Chain, rail_types: &HashMap<i64, RailingTypeInfo>) -
             host: None,
             placement_offset: None,
             level: None,
+            base_offset: None,
             path: curves_in(bits32, &ch.data, &cur, lo, lo + n),
             type_info: None,
         };
@@ -87,6 +88,11 @@ pub(crate) fn railings(ch: &Chain, rail_types: &HashMap<i64, RailingTypeInfo>) -
             r.host = Some(q(bd, if bits32 { t - 20 } else { t - 32 }));
             r.placement_offset = Some(f64_at(bd, if bits32 { t - 32 } else { t - 24 }));
             r.type_info = rail_types.get(&q(bd, t)).cloned();
+            // step 2202: base offset f64 @t+26 (32-bit @t+34)
+            let o = t + if bits32 { 34 } else { 26 };
+            if o + 8 <= bd.len() {
+                r.base_offset = Some(f64_at(bd, o));
+            }
         }
         if sp.len() >= 2 && sp[1] + 2 * w <= bd.len() {
             r.level = Some(q(bd, sp[1] + w));

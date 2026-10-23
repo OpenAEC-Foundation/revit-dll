@@ -350,15 +350,21 @@ pub fn scene(doc: &Document) -> Scene {
     }
 
     // Railings (§35): top rail along the path at the railing (or top rail) height, posts at most
-    // 3 ft apart. The base is the railing's level when it has one (step 2200: the path z is
-    // sometimes 0 for a railing on an upper level); otherwise the path z.
+    // 3 ft apart. The base is the railing's level plus its base offset when it has a level
+    // (steps 2200, 2202: the path z is sometimes 0 for a railing on an upper level); otherwise
+    // the path z.
+    let bits32 = doc.info().bits == Some(32);
     for r in doc.railings() {
         let info = r.type_info.as_ref();
-        let h = info.and_then(|t| t.height.or(t.toprail_height)).filter(|h| *h > 0.0 && *h < 20.0).unwrap_or(3.5);
+        // step 2204: 64-bit top rail height first (Railing Height is 0 for some types); 32-bit
+        // Railing Height first (its top rail fields read as 4.0 / type 4 there)
+        let ok = |v: Option<f64>| v.filter(|h| *h > 0.0 && *h < 20.0);
+        let (th, rh) = (ok(info.and_then(|t| t.toprail_height)), ok(info.and_then(|t| t.height)));
+        let h = if bits32 { rh.or(th) } else { th.or(rh) }.unwrap_or(3.5);
         let up = [0.0, 0.0, h];
         let path_z = r.path.iter().flat_map(sample).next().map(|p| p[2]);
         let dz = match (r.level.and_then(|l| doc.level_elevation(l)), path_z) {
-            (Some(z), Some(pz)) => z - pz,
+            (Some(z), Some(pz)) => z + r.base_offset.unwrap_or(0.0) - pz,
             _ => 0.0,
         };
         let b = batch!("Railings", [0.45, 0.47, 0.50]);
