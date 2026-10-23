@@ -14,6 +14,7 @@ const USAGE: &str = "usage:
   rvt railings <file.rvt>              railings (path, type, height, level)
   rvt stairs <file.rvt>                component stairs (riser, tread, levels, height, runs)
   rvt stairs_runs <file.rvt>           stairs runs (width, base and top elevation)
+  rvt families <file.rvt>              family document chains and symbol -> family
   rvt wall_types <file.rvt>            type catalogue with layers (wall/floor/roof/ceiling types)
   rvt elements <file.rvt>              element tables per partition and chain
   rvt mesh <file.rvt> [scene.bin]      viewer meshes per category (summary; optional binary)
@@ -112,6 +113,13 @@ fn run(args: &[String]) -> Result<Value, String> {
             let chains: Vec<Value> =
                 doc.stairs_by_chain().into_iter().map(|(s, i, v)| json!({"stream": s, "index": i, "stairs": v})).collect();
             Ok(json!({"chains": chains}))
+        }
+        "families" => {
+            let doc = rvt_read::Document::open(path).map_err(err)?;
+            let fc: serde_json::Map<String, Value> =
+                doc.family_chains().into_iter().map(|(f, (s, i))| (f.to_string(), json!([s, i]))).collect();
+            let sf: serde_json::Map<String, Value> = doc.symbol_family().into_iter().map(|(s, f)| (s.to_string(), json!(f))).collect();
+            Ok(json!({"family_chains": fc, "symbol_family": sf}))
         }
         "stairs_runs" => {
             let doc = rvt_read::Document::open(path).map_err(err)?;

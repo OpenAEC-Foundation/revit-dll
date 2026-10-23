@@ -2,6 +2,7 @@
 
 mod compound;
 mod curves;
+mod families;
 mod instances;
 mod levels;
 mod mep;
@@ -428,6 +429,20 @@ impl Document {
 
     pub fn stairs_runs(&self) -> Vec<rvt_model::StairsRun> {
         self.stairs_runs_by_chain().into_iter().flat_map(|(_, _, s)| s).collect()
+    }
+
+    /// Family id -> (partition stream, chain index) of the chain holding the family's own
+    /// document (step 492; reference `catalog.family_chains`).
+    pub fn family_chains(&self) -> std::collections::BTreeMap<u64, (String, usize)> {
+        families::family_chains(&self.partitions)
+            .into_iter()
+            .map(|(f, (q, xi))| (f, (self.partitions[q].stream.clone(), self.partitions[q].chains[xi].index)))
+            .collect()
+    }
+
+    /// Symbol (family type) id -> family id (step 494; reference `catalog.symbol_family`).
+    pub fn symbol_family(&self) -> HashMap<u64, u64> {
+        families::symbol_family(&self.partitions)
     }
 
     pub fn stairs(&self) -> Vec<Stair> {
