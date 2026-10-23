@@ -1,0 +1,32 @@
+# Revit and family files: never commit (see README, "Test data")
+*.rvt
+*.rfa
+*.rte
+*.rft
+*.rvt.*
+backup/
+samples/
+exports/
+
+# Build output
+target/
+bin/
+obj/
+*.dll
+*.pdb
+*.lib
+*.exp
+*.so
+*.dylib
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Editors / OS
+.vs/
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
