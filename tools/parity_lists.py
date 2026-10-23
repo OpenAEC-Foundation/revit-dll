@@ -12,6 +12,7 @@ import sys
 import tempfile
 
 TOL = float(os.environ.get("RVT_PARITY_TOL", "0"))
+CATALOG = {"wall_types"}
 
 
 def same(a, b):
@@ -32,9 +33,20 @@ def compare(exe, name, ref_path, rvt):
         r = subprocess.run([exe, name, rvt, "-o", out], capture_output=True, text=True)
         if r.returncode:
             return 0, [f"RUST FAILED: {r.stderr.strip()[:200]}"]
-        rust = {(c["stream"], c["index"]): c[name] for c in json.load(open(out, encoding="utf-8"))["chains"]}
+        rust_doc = json.load(open(out, encoding="utf-8"))
+        rust = {(c["stream"], c["index"]): c[name] for c in rust_doc.get("chains", [])}
     ref = json.load(open(ref_path, encoding="utf-8"))
     n, bad = 0, []
+    if name in CATALOG:   # whole-file catalogue lists: reference `catalog[name]`, Rust `{name: [...]}`
+        want, got = ref.get("catalog", {}).get(name) or [], rust_doc.get(name) or []
+        if len(want) != len(got):
+            return 0, [f"catalog {name}: {len(want)} records != {len(got)}"]
+        for a, b in zip(want, got):
+            n += 1
+            if not same(a, b):
+                bad.append(f"catalog id {a.get('id')}: " + str({k: (a.get(k), b.get(k)) for k in set(a) | set(b) if not same(a.get(k), b.get(k))}))
+                break
+        return n, bad
     for p in ref["partitions"]:
         for c in p["chains"]:
             if c.get("virtual_family") is not None or not isinstance(c.get("project"), dict):

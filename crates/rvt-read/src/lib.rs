@@ -1,5 +1,6 @@
 //! Semantic readers: elements of a Revit file to the neutral model, behind a queryable [`Document`].
 
+mod compound;
 mod curves;
 mod levels;
 mod util;
@@ -8,7 +9,7 @@ mod walls;
 use std::collections::{HashMap, HashSet};
 
 use rvt_core::{read_partitions, vtag, Cfb, Chain, Element, Partition};
-use rvt_model::{DocumentInfo, ElementInfo, Level, Wall};
+use rvt_model::{CompoundType, DocumentInfo, ElementInfo, Level, Wall};
 
 pub use rvt_core::{Error, Result};
 
@@ -145,6 +146,16 @@ impl Document {
     /// Levels of all project chains.
     pub fn levels(&self) -> Vec<Level> {
         self.project_chains().flat_map(|(_, ch)| levels::levels(ch, &self.level_types)).collect()
+    }
+
+    /// Type catalogue with compound structures (wall, floor, roof, ceiling types), from chain 0 of
+    /// every partition (step 426).
+    pub fn compound_types(&self) -> Vec<CompoundType> {
+        self.partitions
+            .iter()
+            .filter_map(|p| p.chains.first().filter(|c| c.bits.is_some()))
+            .flat_map(compound::compound_types)
+            .collect()
     }
 
     /// Wall instances of all project chains.

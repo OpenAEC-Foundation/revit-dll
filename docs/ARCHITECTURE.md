@@ -30,6 +30,7 @@ A port counts as done only when the Rust output matches the reference export:
 | Compound file, partitions, chains, section A/B, version tags | **done** | 100/100 rvt100 + 7 samples 2014/2015, ~1.12 M elements, 0 mismatches |
 | Levels (§18) | **done** | 111 files (rvt100 + 11 samples 2014/2015), 171 levels, 0 mismatches |
 | Walls (§29: line/arc location, type, levels, height, stacked, curtain panels, in-place, phases) | **done** | 111 files, 1416 walls, 0 mismatches |
+| Type catalogue with compound structures (§25: wall/floor/roof/ceiling types, layers, materials, core) | **done** | 111 files, 1487 types, 0 mismatches |
 | Other semantic readers (≈ 200 lists of the reference export) | not started | — |
 | Query API: `Document::open`, `info`, `element(id)`, `elements()`, `elements_in_category`, `levels`, `walls` | **started** | CLI `rvt info/element/category/levels` |
 | Exporters | not started | — |
@@ -83,3 +84,14 @@ without bindings for every struct.
   files must be published under MPL-2.0. `rvt-export` uses it behind the `cad` feature, so
   there is no separate DXF writer of our own.
 - **Licence of this crate.** Proprietary for now (`publish = false`).
+
+## Porting rules (learned from parity checks)
+
+- Totals of floats use `util::py_sum` (CPython 3.12+ `sum()` is Neumaier-compensated); a plain
+  fold differs in the last bit.
+- Strings `u32 n | UTF-16` decode strictly (invalid surrogates = no string), and `is_printable`
+  approximates Python's `str.isprintable`.
+- Byte searches follow Python semantics exactly: `rfind(x, 0, o)` means the match must end before
+  `o`; regex `finditer` matches do not overlap.
+- Sets of ids used across partitions (level types, wall types, phases, owners) are built once in
+  `Document::from_partitions`, as the reference export builds its globals.

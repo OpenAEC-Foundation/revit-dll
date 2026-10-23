@@ -33,6 +33,36 @@ pub struct DocumentInfo {
     pub element_count: usize,
 }
 
+/// One layer of a compound structure (§25).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Layer {
+    /// None, Structure, Substrate, Insulation, Finish1, Finish2, Membrane, StructuralDeck.
+    pub function: &'static str,
+    /// Material element id.
+    pub material: Option<i64>,
+    pub width: f64,
+    /// Layer participates in wrapping (LayerCapFlag).
+    pub cap: bool,
+    /// Deck profile family symbol, for structural deck layers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deck_profile: Option<i64>,
+}
+
+/// Type with a compound structure: wall, floor, roof or ceiling type (§25, steps 293–296, 307,
+/// 319, 427, 789, 1349).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct CompoundType {
+    pub id: u64,
+    pub cat: i32,
+    pub name: Option<String>,
+    pub layers: Vec<Layer>,
+    /// Total thickness.
+    pub width: f64,
+    pub structural_index: Option<i32>,
+    /// First and last core layer.
+    pub core: Option<[i32; 2]>,
+}
+
 /// Circular arc: P(t) = C + r·(cos t·X + sin t·Y), t ∈ [t0, t1] (§6, step 460).
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ArcCurve {
