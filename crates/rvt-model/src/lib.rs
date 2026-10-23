@@ -127,3 +127,92 @@ pub struct Level {
     #[serde(rename = "type")]
     pub level_type: Option<u64>,
 }
+
+/// One curve of a sketch or curve table (§6/§7): line, arc, ellipse or full circle. Only the
+/// fields of its kind are set, as in the reference export.
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
+pub struct Curve {
+    pub id: u64,
+    /// "line", "arc", "ellipse" or "circle".
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p0: Option<[f64; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p1: Option<[f64; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub t0: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub t1: Option<f64>,
+    #[serde(rename = "C", skip_serializing_if = "Option::is_none")]
+    pub center: Option<[f64; 3]>,
+    #[serde(rename = "X", skip_serializing_if = "Option::is_none")]
+    pub x: Option<[f64; 3]>,
+    #[serde(rename = "Y", skip_serializing_if = "Option::is_none")]
+    pub y: Option<[f64; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rx: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ry: Option<f64>,
+    /// Arc flag byte @I+11.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bounded: Option<u8>,
+    /// Ellipse layout 2 (step 1922).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout: Option<u8>,
+    /// Zero-length line inside a curve table (step 467).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degenerate: Option<bool>,
+}
+
+/// Floor or ceiling (§31, steps 383–386, 393, 1323–1324).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Floor {
+    pub id: u64,
+    pub sketch: u64,
+    pub level: i64,
+    #[serde(rename = "type")]
+    pub floor_type: Option<i64>,
+    /// Height offset from the level.
+    pub offset: f64,
+    pub thickness: Option<f64>,
+    pub top_z: Option<f64>,
+    /// Boundary loops' curves, in table order.
+    pub curves: Vec<Curve>,
+}
+
+/// Roof edge: a sketch curve with its slope definition (§32).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct RoofEdge {
+    #[serde(flatten)]
+    pub curve: Curve,
+    pub slope: Option<bool>,
+    /// Slope angle in radians.
+    pub angle: Option<f64>,
+}
+
+/// Footprint or extrusion roof (§32, steps 387–392, 1325, 1359–1360).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Roof {
+    pub id: u64,
+    /// "footprint" or "extrusion".
+    pub kind: &'static str,
+    pub sketch: u64,
+    pub level: i64,
+    #[serde(rename = "type")]
+    pub roof_type: Option<i64>,
+    pub offset: f64,
+    pub thickness: Option<f64>,
+    pub base_z: Option<f64>,
+    pub edges: Vec<RoofEdge>,
+    /// Extrusion roofs: extrusion start and end along the sketch plane normal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end: Option<f64>,
+    /// Extrusion roofs: sketch plane normal (null when the frame is not found).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub normal: Option<Option<[f64; 3]>>,
+}

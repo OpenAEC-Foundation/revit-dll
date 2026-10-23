@@ -8,6 +8,7 @@ const USAGE: &str = "usage:
   rvt category <file.rvt> <category>   elements of a built-in category (e.g. -2000011 = walls)
   rvt levels <file.rvt>                levels per project chain
   rvt walls <file.rvt>                 walls per project chain
+  rvt floors|ceilings|roofs <file.rvt> slabs per project chain, with sketch curves
   rvt wall_types <file.rvt>            type catalogue with layers (wall/floor/roof/ceiling types)
   rvt elements <file.rvt>              element tables per partition and chain
 Each command prints JSON; add `-o out.json` to write a file instead.";
@@ -68,6 +69,15 @@ fn run(args: &[String]) -> Result<Value, String> {
         "wall_types" => {
             let doc = rvt_read::Document::open(path).map_err(err)?;
             Ok(json!({"wall_types": doc.compound_types()}))
+        }
+        "floors" | "ceilings" | "roofs" => {
+            let doc = rvt_read::Document::open(path).map_err(err)?;
+            let chains: Vec<Value> = match cmd {
+                "floors" => doc.floors_by_chain().into_iter().map(|(s, i, v)| json!({"stream": s, "index": i, cmd: v})).collect(),
+                "ceilings" => doc.ceilings_by_chain().into_iter().map(|(s, i, v)| json!({"stream": s, "index": i, cmd: v})).collect(),
+                _ => doc.roofs_by_chain().into_iter().map(|(s, i, v)| json!({"stream": s, "index": i, cmd: v})).collect(),
+            };
+            Ok(json!({"chains": chains}))
         }
         "walls" => {
             let doc = rvt_read::Document::open(path).map_err(err)?;

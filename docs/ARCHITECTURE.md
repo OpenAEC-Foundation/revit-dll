@@ -31,6 +31,8 @@ A port counts as done only when the Rust output matches the reference export:
 | Levels (§18) | **done** | 111 files (rvt100 + 11 samples 2014/2015), 171 levels, 0 mismatches |
 | Walls (§29: line/arc location, type, levels, height, stacked, curtain panels, in-place, phases) | **done** | 111 files, 1416 walls, 0 mismatches |
 | Type catalogue with compound structures (§25: wall/floor/roof/ceiling types, layers, materials, core) | **done** | 111 files, 1487 types, 0 mismatches |
+| Curve tables (§7: lines, arcs, ellipses, full circles; 64-bit and 32-bit) | **done** | via floors/ceilings/roofs |
+| Floors, ceilings (§31) and roofs (§32: footprint, extrusion, edge slopes) | **done** | 111 files: 161 floors, 395 ceilings, 31 roofs, 0 mismatches |
 | Other semantic readers (≈ 200 lists of the reference export) | not started | — |
 | Query API: `Document::open`, `info`, `element(id)`, `elements()`, `elements_in_category`, `levels`, `walls` | **started** | CLI `rvt info/element/category/levels` |
 | Exporters | not started | — |

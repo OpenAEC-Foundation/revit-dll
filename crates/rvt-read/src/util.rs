@@ -93,3 +93,7 @@ pub fn py_sum(values: impl IntoIterator<Item = f64>) -> f64 {
     }
     s
 }
+
+pub fn u64_at(b: &[u8], o: usize) -> u64 {
+    u64::from_le_bytes(b[o..o + 8].try_into().expect("8 bytes"))
+}

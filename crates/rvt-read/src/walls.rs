@@ -26,13 +26,13 @@ enum Loc {
 impl Loc {
     fn from_block(b: Block) -> Option<Loc> {
         match b {
-            Block::Line { p0, p1 } => Some(Loc::Line { p0, p1 }),
-            Block::Arc { t0, t1, x, y, r, c } => Some(Loc::Arc {
+            Block::Line { p0, p1, .. } => Some(Loc::Line { p0, p1 }),
+            Block::Arc { t0, t1, x, y, r, c, .. } => Some(Loc::Arc {
                 p0: arc_point(&c, r, &x, &y, t0),
                 p1: arc_point(&c, r, &x, &y, t1),
                 curve: ArcCurve { kind: "arc", center: c, r, x, y, t0, t1 },
             }),
-            Block::Ellipse => None,
+            Block::Ellipse { .. } => None,
         }
     }
 }
@@ -48,7 +48,7 @@ fn wall_line(bd: &[u8], bits32: bool) -> Option<Loc> {
         let mut k = find_from(bd, &mk, 4);
         while let Some(kk) = k {
             if kk + 8 <= bd.len() && bd[kk + 7] == 1 {
-                if let Some(Block::Line { p0, p1 }) = block(bd, kk - 4) {
+                if let Some(Block::Line { p0, p1, .. }) = block(bd, kk - 4) {
                     return Some(Loc::Line { p0, p1 });
                 }
             }

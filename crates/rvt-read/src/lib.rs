@@ -3,13 +3,14 @@
 mod compound;
 mod curves;
 mod levels;
+mod slabs;
 mod util;
 mod walls;
 
 use std::collections::{HashMap, HashSet};
 
 use rvt_core::{read_partitions, vtag, Cfb, Chain, Element, Partition};
-use rvt_model::{CompoundType, DocumentInfo, ElementInfo, Level, Wall};
+use rvt_model::{CompoundType, DocumentInfo, ElementInfo, Floor, Level, Roof, Wall};
 
 pub use rvt_core::{Error, Result};
 
@@ -42,6 +43,10 @@ pub struct Document {
     /// 32-bit: element -> owning family (owner32) and the families that own views (step 2163).
     owner32: HashMap<u64, i32>,
     view_owners: HashSet<i32>,
+    /// Floor/roof/ceiling ids per category over chain 0 of all partitions (step 389).
+    slab_cat_ids: HashMap<i32, HashSet<i64>>,
+    /// Compound type id -> total thickness (step 426, reference `gtw`).
+    type_width: HashMap<i64, f64>,
 }
 
 impl Document {
@@ -87,7 +92,30 @@ impl Document {
                 }
             }
         }
-        let mut doc = Document { partitions, project, index, level_types, level_z: HashMap::new(), wall_types, phases, owner32, view_owners };
+        let mut slab_cat_ids: HashMap<i32, HashSet<i64>> = HashMap::new();
+        for p in &partitions {
+            if let Some(ch) = p.chains.first().filter(|c| c.bits.is_some()) {
+                for e in &ch.elements {
+                    if [slabs::CAT_FLOORS, slabs::CAT_STRUCTURAL_FOUNDATION, slabs::CAT_ROOFS, slabs::CAT_CEILINGS].contains(&e.cat) {
+                        slab_cat_ids.entry(e.cat).or_default().insert(e.id as i64);
+                    }
+                }
+            }
+        }
+        let mut doc = Document {
+            partitions,
+            project,
+            index,
+            level_types,
+            level_z: HashMap::new(),
+            wall_types,
+            phases,
+            owner32,
+            view_owners,
+            slab_cat_ids,
+            type_width: HashMap::new(),
+        };
+        doc.type_width = doc.compound_types().into_iter().map(|t| (t.id as i64, t.width)).collect();
         let mut level_z = HashMap::new();
         for p in &doc.partitions {
             if let Some(ch) = p.chains.first().filter(|c| c.bits.is_some()) {
@@ -170,15 +198,76 @@ impl Document {
             .map(|(p, ch)| {
                 let mut w = walls::walls(ch, &ctx);
                 if ch.bits == Some(32) {
-                    // step 2163: walls owned by an embedded family document (owns views or is nested) are not project content
-                    w.retain(|r| {
-                        let o = self.owner32.get(&r.id).copied().unwrap_or(-1);
-                        !(o != -1 && (self.view_owners.contains(&o) || self.owner32.get(&(o as u64)).copied().unwrap_or(-1) != -1))
-                    });
+                    w.retain(|r| !self.in_family_document(r.id));
                 }
                 (p.stream.clone(), ch.index, w)
             })
             .collect()
+    }
+
+    /// Step 2163 (32-bit): owned by an embedded family document (the owner owns views or is nested);
+    /// such walls, floors, roofs and ceilings are not project content.
+    fn in_family_document(&self, id: u64) -> bool {
+        let o = self.owner32.get(&id).copied().unwrap_or(-1);
+        o != -1 && (self.view_owners.contains(&o) || self.owner32.get(&(o as u64)).copied().unwrap_or(-1) != -1)
+    }
+
+    fn slab_ctx(&self) -> slabs::SlabContext<'_> {
+        slabs::SlabContext { level_z: &self.level_z, type_width: &self.type_width, cat_ids: &self.slab_cat_ids }
+    }
+
+    /// Floors per project chain (§31; floors and structural foundation slabs).
+    pub fn floors_by_chain(&self) -> Vec<(String, usize, Vec<Floor>)> {
+        let ctx = self.slab_ctx();
+        self.project_chains()
+            .map(|(p, ch)| {
+                let mut f = slabs::floors(ch, &ctx, &[slabs::CAT_FLOORS, slabs::CAT_STRUCTURAL_FOUNDATION], -1001951);
+                if ch.bits == Some(32) {
+                    f.retain(|r| !self.in_family_document(r.id));
+                }
+                (p.stream.clone(), ch.index, f)
+            })
+            .collect()
+    }
+
+    /// Ceilings per project chain (§31.6, step 393).
+    pub fn ceilings_by_chain(&self) -> Vec<(String, usize, Vec<Floor>)> {
+        let ctx = self.slab_ctx();
+        self.project_chains()
+            .map(|(p, ch)| {
+                let mut f = slabs::floors(ch, &ctx, &[slabs::CAT_CEILINGS], -1002300);
+                if ch.bits == Some(32) {
+                    f.retain(|r| !self.in_family_document(r.id));
+                }
+                (p.stream.clone(), ch.index, f)
+            })
+            .collect()
+    }
+
+    /// Roofs per project chain (§32).
+    pub fn roofs_by_chain(&self) -> Vec<(String, usize, Vec<Roof>)> {
+        let ctx = self.slab_ctx();
+        self.project_chains()
+            .map(|(p, ch)| {
+                let mut r = slabs::roofs(ch, &ctx);
+                if ch.bits == Some(32) {
+                    r.retain(|x| !self.in_family_document(x.id));
+                }
+                (p.stream.clone(), ch.index, r)
+            })
+            .collect()
+    }
+
+    pub fn floors(&self) -> Vec<Floor> {
+        self.floors_by_chain().into_iter().flat_map(|(_, _, f)| f).collect()
+    }
+
+    pub fn ceilings(&self) -> Vec<Floor> {
+        self.ceilings_by_chain().into_iter().flat_map(|(_, _, f)| f).collect()
+    }
+
+    pub fn roofs(&self) -> Vec<Roof> {
+        self.roofs_by_chain().into_iter().flat_map(|(_, _, r)| r).collect()
     }
 
     /// Levels per project chain, keyed by (partition stream, chain index); used by parity checks.
