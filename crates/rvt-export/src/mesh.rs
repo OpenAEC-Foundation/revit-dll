@@ -315,6 +315,9 @@ fn instance_batch(cat: i32) -> (&'static str, [f32; 3]) {
         -2001260 => ("Site", [0.55, 0.52, 0.45]),
         -2001140 | -2008013 | -2008010 | -2008016 | -2008055 => ("MEP equipment and terminals", [0.40, 0.65, 0.55]),
         -2001120 => ("Lighting fixtures", [0.96, 0.62, 0.04]),
+        -2000170 => ("Curtain panels", [0.62, 0.74, 0.82]),
+        -2000171 => ("Curtain wall mullions", [0.55, 0.57, 0.60]),
+        -2000151 => ("Generic models", [0.70, 0.68, 0.64]),
         _ => ("Other family instances", [0.66, 0.66, 0.68]),
     }
 }
@@ -340,7 +343,35 @@ pub fn scene(doc: &Document) -> Scene {
         };
     }
 
+    // Curtain panels and mullions (step 2215): their stored boxes are the real panel/mullion extents
+    // (Storax: mullion 28 × 64 × 2000 mm, louvre 60 × 100 × 2000 mm), except in some models where a
+    // panel box spans a whole wall; those (two sides > 3 m) are skipped.
+    let curtain_boxes: Vec<[f64; 6]> = doc
+        .instances()
+        .iter()
+        .filter(|i| matches!(i.cat, -2000170 | -2000171))
+        .filter_map(|i| doc.element(i.id).and_then(|e| e.bbox))
+        .filter(|bb| {
+            let ext = [bb[3] - bb[0], bb[4] - bb[1], bb[5] - bb[2]];
+            ext.iter().all(|v| v.is_finite() && *v >= 0.0 && *v < 1e4) && ext.iter().filter(|v| **v * FT > 3.0).count() < 2
+        })
+        .collect();
     for w in doc.walls() {
+        // A wall without a compound type (curtain wall, storefront) is drawn by its panels and
+        // mullions when it has any; drawing it solid hides them (step 2215).
+        if doc.type_thickness(w.wall_type).is_none() && !curtain_boxes.is_empty() {
+            let (lo, hi) = (
+                [w.p0[0].min(w.p1[0]) - 1.0, w.p0[1].min(w.p1[1]) - 1.0],
+                [w.p0[0].max(w.p1[0]) + 1.0, w.p0[1].max(w.p1[1]) + 1.0],
+            );
+            let inside = |bb: &[f64; 6]| {
+                let (cx, cy) = ((bb[0] + bb[3]) / 2.0, (bb[1] + bb[4]) / 2.0);
+                cx >= lo[0] && cx <= hi[0] && cy >= lo[1] && cy <= hi[1]
+            };
+            if curtain_boxes.iter().any(inside) {
+                continue;
+            }
+        }
         let base = doc.level_elevation(w.base_level).map(|z| z + w.base_offset).unwrap_or(w.p0[2]);
         let height = w.height.filter(|h| *h > 0.0 && h.is_finite()).unwrap_or(10.0);
         let t = doc.type_thickness(w.wall_type).filter(|t| *t > 0.0).unwrap_or(0.5);
@@ -545,9 +576,7 @@ pub fn scene(doc: &Document) -> Scene {
     }
 
     let insts: Vec<Instance> = doc.instances();
-    // Curtain panels and mullions are skipped: their stored boxes span the whole curtain wall, which
-    // is already drawn as a wall.
-    for i in insts.iter().filter(|i| i.scale.is_none() && i.origin.is_some() && !matches!(i.cat, -2000170 | -2000171)) {
+    for i in insts.iter().filter(|i| i.scale.is_none() && i.origin.is_some()) {
         let Some(e) = doc.element(i.id) else { continue };
         if e.view.is_some_and(|v| v != -1) {
             continue; // view-specific (annotation)
@@ -561,6 +590,9 @@ pub fn scene(doc: &Document) -> Scene {
         // itself (site, massing or nested content); drawing it hides the building.
         if ext.iter().all(|v| *v * FT > 3.0) {
             continue;
+        }
+        if matches!(i.cat, -2000170 | -2000171) && ext.iter().filter(|v| **v * FT > 3.0).count() >= 2 {
+            continue; // panel box spanning a whole wall (see curtain_boxes above)
         }
         let (name, color) = instance_batch(i.cat);
         batch!(name, color).aabb(bb);
