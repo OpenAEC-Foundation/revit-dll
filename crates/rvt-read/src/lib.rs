@@ -1,12 +1,14 @@
 //! Semantic readers: elements of a Revit file to the neutral model, behind a queryable [`Document`].
 
+mod curves;
 mod levels;
 mod util;
+mod walls;
 
 use std::collections::{HashMap, HashSet};
 
 use rvt_core::{read_partitions, vtag, Cfb, Chain, Element, Partition};
-use rvt_model::{DocumentInfo, ElementInfo, Level};
+use rvt_model::{DocumentInfo, ElementInfo, Level, Wall};
 
 pub use rvt_core::{Error, Result};
 
@@ -17,7 +19,10 @@ pub(crate) const TAG_FAMILY: u16 = 1967;
 pub(crate) const TAG_LEVEL: u16 = 2535;
 pub(crate) const TAG_LEVEL_TYPE: u16 = 2536;
 const TAG_HDR: u16 = 765;
+const TAG_WALL_RECORD: u16 = 3842;
 const CAT_WALLS: i32 = -2000011;
+const CAT_PHASES: i32 = -2000112;
+const CAT_VIEWS: i32 = -2000279;
 
 /// An opened `.rvt` file.
 pub struct Document {
@@ -27,6 +32,15 @@ pub struct Document {
     index: HashMap<u64, (usize, usize, usize)>,
     /// LevelType ids over all partitions (step 1001).
     pub(crate) level_types: HashSet<u64>,
+    /// Level id -> elevation, from chain 0 of every partition (reference `glev`, step 369).
+    level_z: HashMap<i64, f64>,
+    /// Wall type ids over all partitions (reference `gwt`).
+    wall_types: HashSet<i64>,
+    /// Phase ids over all partitions (step 1880).
+    phases: HashSet<i64>,
+    /// 32-bit: element -> owning family (owner32) and the families that own views (step 2163).
+    owner32: HashMap<u64, i32>,
+    view_owners: HashSet<i32>,
 }
 
 impl Document {
@@ -39,6 +53,8 @@ impl Document {
         let mut project = Vec::new();
         let mut index = HashMap::new();
         let mut level_types = HashSet::new();
+        let (mut wall_types, mut phases) = (HashSet::new(), HashSet::new());
+        let (mut owner32, mut view_owners) = (HashMap::new(), HashSet::new());
         for (pi, p) in partitions.iter().enumerate() {
             for (ci, ch) in p.chains.iter().enumerate() {
                 if ch.bits.is_none() {
@@ -48,15 +64,39 @@ impl Document {
                     project.push((pi, ci));
                 }
                 let lt = vtag(ch.version, TAG_LEVEL_TYPE);
+                let rec = vtag(ch.version, TAG_WALL_RECORD);
                 for (ei, e) in ch.elements.iter().enumerate() {
                     index.entry(e.id).or_insert((pi, ci, ei));
                     if e.tag.is_some() && e.tag == lt {
                         level_types.insert(e.id);
                     }
+                    if e.cat == CAT_WALLS && rec.map_or(true, |t| e.tag != Some(t)) {
+                        wall_types.insert(e.id as i64);
+                    }
+                    if e.cat == CAT_PHASES && e.id > 0 {
+                        phases.insert(e.id as i64);
+                    }
+                    if ch.bits == Some(32) {
+                        let o = e.owner32.unwrap_or(-1);
+                        owner32.insert(e.id, o);
+                        if e.cat == CAT_VIEWS && o != -1 {
+                            view_owners.insert(o);
+                        }
+                    }
                 }
             }
         }
-        Document { partitions, project, index, level_types }
+        let mut doc = Document { partitions, project, index, level_types, level_z: HashMap::new(), wall_types, phases, owner32, view_owners };
+        let mut level_z = HashMap::new();
+        for p in &doc.partitions {
+            if let Some(ch) = p.chains.first().filter(|c| c.bits.is_some()) {
+                for l in levels::levels(ch, &doc.level_types) {
+                    level_z.insert(l.id as i64, l.elevation);
+                }
+            }
+        }
+        doc.level_z = level_z;
+        doc
     }
 
     pub fn info(&self) -> DocumentInfo {
@@ -107,6 +147,29 @@ impl Document {
         self.project_chains().flat_map(|(_, ch)| levels::levels(ch, &self.level_types)).collect()
     }
 
+    /// Wall instances of all project chains.
+    pub fn walls(&self) -> Vec<Wall> {
+        self.walls_by_chain().into_iter().flat_map(|(_, _, w)| w).collect()
+    }
+
+    /// Walls per project chain, keyed by (partition stream, chain index).
+    pub fn walls_by_chain(&self) -> Vec<(String, usize, Vec<Wall>)> {
+        let ctx = walls::WallContext { level_z: &self.level_z, wall_types: &self.wall_types, phases: &self.phases };
+        self.project_chains()
+            .map(|(p, ch)| {
+                let mut w = walls::walls(ch, &ctx);
+                if ch.bits == Some(32) {
+                    // step 2163: walls owned by an embedded family document (owns views or is nested) are not project content
+                    w.retain(|r| {
+                        let o = self.owner32.get(&r.id).copied().unwrap_or(-1);
+                        !(o != -1 && (self.view_owners.contains(&o) || self.owner32.get(&(o as u64)).copied().unwrap_or(-1) != -1))
+                    });
+                }
+                (p.stream.clone(), ch.index, w)
+            })
+            .collect()
+    }
+
     /// Levels per project chain, keyed by (partition stream, chain index); used by parity checks.
     pub fn levels_by_chain(&self) -> Vec<(String, usize, Vec<Level>)> {
         self.project_chains().map(|(p, ch)| (p.stream.clone(), ch.index, levels::levels(ch, &self.level_types))).collect()
@@ -134,7 +197,7 @@ fn is_project(ch: &Chain) -> bool {
 }
 
 /// Header field `ffffffff | u16 class 765 | u32 1` (§29.2, step 378); none if the class is unknown (step 1477).
-fn hdr_marker(ch: &Chain) -> Option<Vec<u8>> {
+pub(crate) fn hdr_marker(ch: &Chain) -> Option<Vec<u8>> {
     let t = vtag(ch.version, TAG_HDR)?;
     let mut m = vec![0xff; 4];
     m.extend_from_slice(&t.to_le_bytes());

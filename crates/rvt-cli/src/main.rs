@@ -7,6 +7,7 @@ const USAGE: &str = "usage:
   rvt element <file.rvt> <id>          one element
   rvt category <file.rvt> <category>   elements of a built-in category (e.g. -2000011 = walls)
   rvt levels <file.rvt>                levels per project chain
+  rvt walls <file.rvt>                 walls per project chain
   rvt elements <file.rvt>              element tables per partition and chain
 Each command prints JSON; add `-o out.json` to write a file instead.";
 
@@ -60,6 +61,15 @@ fn run(args: &[String]) -> Result<Value, String> {
                 .levels_by_chain()
                 .into_iter()
                 .map(|(s, i, l)| json!({"stream": s, "index": i, "levels": l}))
+                .collect();
+            Ok(json!({"chains": chains}))
+        }
+        "walls" => {
+            let doc = rvt_read::Document::open(path).map_err(err)?;
+            let chains: Vec<Value> = doc
+                .walls_by_chain()
+                .into_iter()
+                .map(|(s, i, w)| json!({"stream": s, "index": i, "walls": w}))
                 .collect();
             Ok(json!({"chains": chains}))
         }

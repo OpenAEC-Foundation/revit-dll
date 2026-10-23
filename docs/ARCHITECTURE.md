@@ -20,7 +20,7 @@ cites the same step numbers.
 
 A port counts as done only when the Rust output matches the reference export:
 
-- `tools/parity_elements.py` compares element tables (container layer).
+- `tools/parity_elements.py` compares element tables (container layer); `tools/parity_lists.py` compares one project list (levels, walls, …).
 - Each further reader gets its own parity check against the same reference JSON.
 - Test files are never committed (see README). The checks run locally against the private
   sample set.
@@ -29,8 +29,9 @@ A port counts as done only when the Rust output matches the reference export:
 |---|---|---|
 | Compound file, partitions, chains, section A/B, version tags | **done** | 100/100 rvt100 + 7 samples 2014/2015, ~1.12 M elements, 0 mismatches |
 | Levels (§18) | **done** | 111 files (rvt100 + 11 samples 2014/2015), 171 levels, 0 mismatches |
+| Walls (§29: line/arc location, type, levels, height, stacked, curtain panels, in-place, phases) | **done** | 111 files, 1416 walls, 0 mismatches |
 | Other semantic readers (≈ 200 lists of the reference export) | not started | — |
-| Query API: `Document::open`, `info`, `element(id)`, `elements()`, `elements_in_category`, `levels` | **started** | CLI `rvt info/element/category/levels` |
+| Query API: `Document::open`, `info`, `element(id)`, `elements()`, `elements_in_category`, `levels`, `walls` | **started** | CLI `rvt info/element/category/levels` |
 | Exporters | not started | — |
 | C ABI | stub | — |
 
