@@ -85,7 +85,17 @@ fn run(args: &[String]) -> Result<Value, String> {
             let batches: Vec<Value> = scene
                 .batches
                 .iter()
-                .map(|b| json!({"name": b.name, "vertices": b.positions.len() / 3, "triangles": b.indices.len() / 3}))
+                .map(|b| {
+                    // per-batch bounds (view coordinates: metres, Y up)
+                    let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+                    for p in b.positions.chunks_exact(3) {
+                        for k in 0..3 {
+                            lo[k] = lo[k].min(p[k]);
+                            hi[k] = hi[k].max(p[k]);
+                        }
+                    }
+                    json!({"name": b.name, "vertices": b.positions.len() / 3, "triangles": b.indices.len() / 3, "min": lo, "max": hi})
+                })
                 .collect();
             Ok(json!({"batches": batches, "bounds_min": scene.bounds_min, "bounds_max": scene.bounds_max, "mesh_ms": ms}))
         }

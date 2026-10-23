@@ -349,15 +349,21 @@ pub fn scene(doc: &Document) -> Scene {
         batch!(name, color).member(s.p0, s.p1, s.width, s.height, s.round);
     }
 
-    // Railings (§35): top rail along the path at the top rail (or railing) height, posts at most
-    // 3 ft apart. The path lies at the railing's base (model coordinates).
+    // Railings (§35): top rail along the path at the railing (or top rail) height, posts at most
+    // 3 ft apart. The base is the railing's level when it has one (step 2200: the path z is
+    // sometimes 0 for a railing on an upper level); otherwise the path z.
     for r in doc.railings() {
         let info = r.type_info.as_ref();
-        let h = info.and_then(|t| t.toprail_height.or(t.height)).filter(|h| *h > 0.0 && *h < 20.0).unwrap_or(3.5);
+        let h = info.and_then(|t| t.height.or(t.toprail_height)).filter(|h| *h > 0.0 && *h < 20.0).unwrap_or(3.5);
         let up = [0.0, 0.0, h];
+        let path_z = r.path.iter().flat_map(sample).next().map(|p| p[2]);
+        let dz = match (r.level.and_then(|l| doc.level_elevation(l)), path_z) {
+            (Some(z), Some(pz)) => z - pz,
+            _ => 0.0,
+        };
         let b = batch!("Railings", [0.45, 0.47, 0.50]);
         for c in &r.path {
-            let pts = sample(c);
+            let pts: Vec<P3> = sample(c).into_iter().map(|p| [p[0], p[1], p[2] + dz]).collect();
             let mut posts = pts.first().copied().into_iter().collect::<Vec<P3>>();
             let mut since = 0.0;
             for s in pts.windows(2) {
