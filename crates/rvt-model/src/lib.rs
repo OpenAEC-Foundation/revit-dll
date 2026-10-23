@@ -216,3 +216,57 @@ pub struct Roof {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub normal: Option<Option<[f64; 3]>>,
 }
+
+/// MEP connector of a family instance (§15.3, steps 220–221, 919).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Connector {
+    #[serde(rename = "P")]
+    pub position: [f64; 3],
+    /// Flow direction (local Z).
+    pub dir: [f64; 3],
+    /// Local X (orientation of rectangular connectors).
+    pub xdir: [f64; 3],
+    pub index: u32,
+    /// "round" or "rectangular".
+    pub shape: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<f64>,
+}
+
+/// Family instance (§13 placement, §16 type, §30 levels; steps 667, 1161–1162, 1327, 2001–2004,
+/// 2038–2048, 2069, 2093, 2151).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Instance {
+    pub id: u64,
+    pub cat: i32,
+    /// Rotation 3×3, row-major as stored (rows are the local X, Y, Z axes).
+    #[serde(rename = "M")]
+    pub rotation: Option<[f64; 9]>,
+    /// Origin (insertion point).
+    #[serde(rename = "O")]
+    pub origin: Option<[f64; 3]>,
+    /// FamilySymbol (type) id.
+    #[serde(rename = "type")]
+    pub symbol: Option<u64>,
+    pub instance_type: Option<u64>,
+    pub connectors: Vec<Connector>,
+    /// View scale of annotation symbols placed in a view (step 1162).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scale: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule_level: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference_level: Option<i64>,
+    /// "sketch_plane", "ff_anchor" or "work_plane_host".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference_level_source: Option<&'static str>,
+    /// Host of the work plane (ceiling, curtain panel, …) for work-plane based instances (step 2045).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work_plane_host: Option<i64>,
+}

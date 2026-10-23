@@ -13,6 +13,8 @@ import tempfile
 
 TOL = float(os.environ.get("RVT_PARITY_TOL", "0"))
 CATALOG = {"wall_types"}
+# optional: compare only these record keys (comma separated), for lists whose other keys are not ported yet
+KEYS = set(filter(None, os.environ.get("RVT_PARITY_KEYS", "").split(",")))
 
 
 def same(a, b):
@@ -62,6 +64,9 @@ def compare(exe, name, ref_path, rvt):
                 continue
             for a, b in zip(want, got):
                 n += 1
+                if KEYS:
+                    a = {k: v for k, v in a.items() if k in KEYS}
+                    b = {k: v for k, v in b.items() if k in KEYS}
                 if not same(a, b):
                     diff = {k: (a.get(k), b.get(k)) for k in set(a) | set(b) if not same(a.get(k), b.get(k))}
                     bad.append(f"{p['stream']}#{c['index']} id {a.get('id')}: {diff}")
