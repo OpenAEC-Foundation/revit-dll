@@ -353,4 +353,46 @@ pub struct Stair {
     pub base_z: Option<f64>,
     /// StairsRun ids (tag 4039) whose body references the stairs.
     pub runs: Vec<u64>,
+    /// Geometry per run id (as a string key, like the reference export).
+    pub run_geometry: std::collections::BTreeMap<String, RunGeometry>,
+}
+
+/// Geometry of one stairs run (steps 446–456): sketch lines by kind ("path", "riser",
+/// "boundary", "run", "landing_center") and, for component runs without a path sketch, the
+/// cached walk path.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct RunGeometry {
+    #[serde(flatten)]
+    pub lines: std::collections::BTreeMap<&'static str, Vec<Curve>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_cached: Option<Vec<PathSegment>>,
+}
+
+/// Segment of a cached run path: a line, or a helix for spiral runs (§33.5, steps 451–456).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PathSegment {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p0: Option<[f64; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p1: Option<[f64; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub t0: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub t1: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pitch: Option<f64>,
+    #[serde(rename = "C", skip_serializing_if = "Option::is_none")]
+    pub center: Option<[f64; 3]>,
+    #[serde(rename = "X", skip_serializing_if = "Option::is_none")]
+    pub x: Option<[f64; 3]>,
+    #[serde(rename = "Y", skip_serializing_if = "Option::is_none")]
+    pub y: Option<[f64; 3]>,
+    #[serde(rename = "Z", skip_serializing_if = "Option::is_none")]
+    pub z: Option<[f64; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub points: Option<Vec<[f64; 3]>>,
 }
