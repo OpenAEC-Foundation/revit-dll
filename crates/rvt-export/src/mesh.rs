@@ -275,16 +275,18 @@ fn dot(a: P3, b: P3) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-/// Triangles of a family's extrusion solids placed by an instance (origin `o`, rotation rows `m`,
-/// step 2214: world[r] = o[r] + Σk m[3r+k]·p[k]), in model coordinates.
-fn family_triangles(solids: &[&ExtrusionSolid], o: P3, m: &[f64; 9]) -> Vec<[P3; 3]> {
-    let xf = |p: P3| -> P3 {
-        [
-            o[0] + m[0] * p[0] + m[1] * p[1] + m[2] * p[2],
-            o[1] + m[3] * p[0] + m[4] * p[1] + m[5] * p[2],
-            o[2] + m[6] * p[0] + m[7] * p[1] + m[8] * p[2],
-        ]
-    };
+/// Instance placement (step 2214): world[r] = o[r] + Σk m[3r+k]·p[k].
+fn place(o: P3, m: &[f64; 9], p: P3) -> P3 {
+    [
+        o[0] + m[0] * p[0] + m[1] * p[1] + m[2] * p[2],
+        o[1] + m[3] * p[0] + m[4] * p[1] + m[5] * p[2],
+        o[2] + m[6] * p[0] + m[7] * p[1] + m[8] * p[2],
+    ]
+}
+
+/// Triangles of a family's extrusion solids in family (local) coordinates.
+fn family_triangles(solids: &[&ExtrusionSolid]) -> Vec<[P3; 3]> {
+    let xf = |p: P3| -> P3 { p };
     let mut out = Vec::new();
     for s in solids {
         let to2 = |p: P3| -> P3 {
@@ -679,20 +681,56 @@ pub fn scene(doc: &Document) -> Scene {
         if let (Some(sym), Some(o), Some(m)) = (i.symbol, i.origin, i.rotation) {
             let sol = solids_of(sym);
             if !sol.is_empty() {
-                let tris = family_triangles(&sol, o, &m);
-                let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
-                for t in &tris {
-                    for p in t {
-                        for k in 0..3 {
-                            lo[k] = lo[k].min(p[k]);
-                            hi[k] = hi[k].max(p[k]);
+                let local = family_triangles(&sol);
+                let bounds = |tris: &[[P3; 3]]| {
+                    let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+                    for t in tris {
+                        for p in t {
+                            for k in 0..3 {
+                                lo[k] = lo[k].min(p[k]);
+                                hi[k] = hi[k].max(p[k]);
+                            }
                         }
                     }
-                }
-                let covers = !tris.is_empty() && (0..3).all(|k| (lo[k] - bb[k]).abs() < 0.15 && (hi[k] - bb[k + 3]).abs() < 0.15);
-                if covers {
+                    (lo, hi)
+                };
+                let world: Vec<[P3; 3]> = local.iter().map(|t| [place(o, &m, t[0]), place(o, &m, t[1]), place(o, &m, t[2])]).collect();
+                let (lo, hi) = bounds(&world);
+                let covers = !world.is_empty() && (0..3).all(|k| (lo[k] - bb[k]).abs() < 0.15 && (hi[k] - bb[k + 3]).abs() < 0.15);
+                // Step 2217: family geometry is parametric (beam length, type sizes, height
+                // parameters). When the rotation is axis-aligned, fit the family shape per local axis
+                // to the element's stored box instead of falling back to the box.
+                let axis_aligned = m.iter().all(|v| v.abs() < 1e-6 || (v.abs() - 1.0).abs() < 1e-6);
+                let fitted: Option<Vec<[P3; 3]>> = (!covers && axis_aligned && !world.is_empty())
+                    .then(|| {
+                        // element box in local coordinates (m is a signed permutation: inverse = transpose)
+                        let inv = |w: P3| -> P3 {
+                            let d = sub(w, o);
+                            [m[0] * d[0] + m[3] * d[1] + m[6] * d[2], m[1] * d[0] + m[4] * d[1] + m[7] * d[2], m[2] * d[0] + m[5] * d[1] + m[8] * d[2]]
+                        };
+                        let (mut elo, mut ehi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+                        for c in 0..8 {
+                            let w = [bb[if c & 1 == 0 { 0 } else { 3 }], bb[if c & 2 == 0 { 1 } else { 4 }], bb[if c & 4 == 0 { 2 } else { 5 }]];
+                            let q = inv(w);
+                            for k in 0..3 {
+                                elo[k] = elo[k].min(q[k]);
+                                ehi[k] = ehi[k].max(q[k]);
+                            }
+                        }
+                        let (slo, shi) = bounds(&local);
+                        let map = |p: P3| -> P3 {
+                            let mut r = [0.0; 3];
+                            for k in 0..3 {
+                                let se = shi[k] - slo[k];
+                                r[k] = if se > 1e-6 { elo[k] + (p[k] - slo[k]) * (ehi[k] - elo[k]) / se } else { (elo[k] + ehi[k]) / 2.0 };
+                            }
+                            place(o, &m, r)
+                        };
+                        local.iter().map(|t| [map(t[0]), map(t[1]), map(t[2])]).collect()
+                    });
+                if covers || fitted.is_some() {
                     let b = batch!(name, color);
-                    for t in tris {
+                    for t in fitted.unwrap_or(world) {
                         b.tri(t[0], t[1], t[2]);
                     }
                     n_family += 1;
