@@ -301,3 +301,33 @@ pub struct MepSystem {
     pub id: u64,
     pub name: Option<String>,
 }
+
+/// Railing (§35, steps 433–445, 1373). Placement fields are anchored on the RailingType id in the
+/// railing body; without a type they stay empty.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Railing {
+    pub id: u64,
+    /// Sketch (tag 4419) holding the path.
+    pub sketch: u64,
+    #[serde(rename = "type")]
+    pub railing_type: Option<i64>,
+    /// Host element, or −1 when the railing is free.
+    pub host: Option<i64>,
+    pub placement_offset: Option<f64>,
+    /// Base level.
+    pub level: Option<i64>,
+    /// Path curves (feet, model coordinates).
+    pub path: Vec<Curve>,
+    /// Values of the RailingType; present when the type was found.
+    #[serde(flatten)]
+    pub type_info: Option<RailingTypeInfo>,
+}
+
+/// RailingType values (§35.3–35.4, steps 440–444).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct RailingTypeInfo {
+    /// Railing Height (feet).
+    pub height: Option<f64>,
+    pub toprail_height: Option<f64>,
+    pub toprail_type: Option<i64>,
+}

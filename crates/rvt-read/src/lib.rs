@@ -5,6 +5,7 @@ mod curves;
 mod instances;
 mod levels;
 mod mep;
+mod railings;
 mod slabs;
 mod util;
 mod walls;
@@ -12,7 +13,7 @@ mod walls;
 use std::collections::{HashMap, HashSet};
 
 use rvt_core::{read_partitions, vtag, Cfb, Chain, Element, Partition};
-use rvt_model::{CompoundType, DocumentInfo, ElementInfo, Floor, Instance, Level, MepSystem, Roof, Segment, Wall};
+use rvt_model::{CompoundType, DocumentInfo, ElementInfo, Floor, Instance, Level, MepSystem, Railing, RailingTypeInfo, Roof, Segment, Wall};
 
 pub use rvt_core::{Error, Result};
 
@@ -59,6 +60,8 @@ pub struct Document {
     type_width: HashMap<i64, f64>,
     /// MEP systems over chain 0 of all partitions (step 241), in file order.
     systems: Vec<MepSystem>,
+    /// RailingType id -> height and top rail, over all chains (step 436, reference `grt`).
+    rail_types: HashMap<i64, RailingTypeInfo>,
 }
 
 impl Document {
@@ -147,7 +150,9 @@ impl Document {
             slab_cat_ids,
             type_width: HashMap::new(),
             systems: Vec::new(),
+            rail_types: HashMap::new(),
         };
+        doc.rail_types = railings::rail_types(doc.partitions.iter().flat_map(|p| p.chains.iter()));
         let mut systems: Vec<MepSystem> = Vec::new();
         for p in &doc.partitions {
             if let Some(ch) = p.chains.first().filter(|c| c.bits.is_some()) {
@@ -374,6 +379,25 @@ impl Document {
             }
         }
         out
+    }
+
+    /// Railings per project chain (§35); the 2014 document chain's railings are merged into the
+    /// first project chain by id (step 2179).
+    pub fn railings_by_chain(&self) -> Vec<(String, usize, Vec<Railing>)> {
+        let mut out: Vec<(String, usize, Vec<Railing>)> =
+            self.project_chains().map(|(p, ch)| (p.stream.clone(), ch.index, railings::railings(ch, &self.rail_types))).collect();
+        if let Some(first) = out.first_mut() {
+            for &(pi, ci) in &self.document {
+                let extra = railings::railings(&self.partitions[pi].chains[ci], &self.rail_types);
+                let have: HashSet<u64> = first.2.iter().map(|r| r.id).collect();
+                first.2.extend(extra.into_iter().filter(|r| !have.contains(&r.id)));
+            }
+        }
+        out
+    }
+
+    pub fn railings(&self) -> Vec<Railing> {
+        self.railings_by_chain().into_iter().flat_map(|(_, _, r)| r).collect()
     }
 
     /// MEP systems (id and name) of the file.

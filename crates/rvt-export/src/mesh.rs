@@ -349,6 +349,34 @@ pub fn scene(doc: &Document) -> Scene {
         batch!(name, color).member(s.p0, s.p1, s.width, s.height, s.round);
     }
 
+    // Railings (§35): top rail along the path at the top rail (or railing) height, posts at most
+    // 3 ft apart. The path lies at the railing's base (model coordinates).
+    for r in doc.railings() {
+        let info = r.type_info.as_ref();
+        let h = info.and_then(|t| t.toprail_height.or(t.height)).filter(|h| *h > 0.0 && *h < 20.0).unwrap_or(3.5);
+        let up = [0.0, 0.0, h];
+        let b = batch!("Railings", [0.45, 0.47, 0.50]);
+        for c in &r.path {
+            let pts = sample(c);
+            let mut posts = pts.first().copied().into_iter().collect::<Vec<P3>>();
+            let mut since = 0.0;
+            for s in pts.windows(2) {
+                b.member(add(s[0], up), add(s[1], up), 0.15, 0.15, false);
+                let len = norm(sub(s[1], s[0]));
+                let mut t = 3.0 - since;
+                while t < len {
+                    posts.push(add(s[0], mul(sub(s[1], s[0]), t / len)));
+                    t += 3.0;
+                }
+                since = (since + len) % 3.0;
+            }
+            posts.extend(pts.last().copied());
+            for p in posts {
+                b.member(p, add(p, up), 0.08, 0.08, false);
+            }
+        }
+    }
+
     let insts: Vec<Instance> = doc.instances();
     // Curtain panels and mullions are skipped: their stored boxes span the whole curtain wall, which
     // is already drawn as a wall.

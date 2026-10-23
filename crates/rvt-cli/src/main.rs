@@ -11,6 +11,7 @@ const USAGE: &str = "usage:
   rvt floors|ceilings|roofs <file.rvt> slabs per project chain, with sketch curves
   rvt instances <file.rvt>             family instances (placement, type, levels, connectors)
   rvt segments <file.rvt>              MEP segments (ducts, pipes, trays, conduits) and systems
+  rvt railings <file.rvt>              railings (path, type, height, level)
   rvt wall_types <file.rvt>            type catalogue with layers (wall/floor/roof/ceiling types)
   rvt elements <file.rvt>              element tables per partition and chain
   rvt mesh <file.rvt> [scene.bin]      viewer meshes per category (summary; optional binary)
@@ -93,6 +94,12 @@ fn run(args: &[String]) -> Result<Value, String> {
             let chains: Vec<Value> =
                 doc.segments_by_chain().into_iter().map(|(s, i, v)| json!({"stream": s, "index": i, "segments": v})).collect();
             Ok(json!({"chains": chains, "systems": doc.systems()}))
+        }
+        "railings" => {
+            let doc = rvt_read::Document::open(path).map_err(err)?;
+            let chains: Vec<Value> =
+                doc.railings_by_chain().into_iter().map(|(s, i, v)| json!({"stream": s, "index": i, "railings": v})).collect();
+            Ok(json!({"chains": chains}))
         }
         "instances" => {
             let doc = rvt_read::Document::open(path).map_err(err)?;
