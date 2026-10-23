@@ -406,3 +406,30 @@ pub struct StairsRun {
     pub base_elevation: f64,
     pub top_elevation: f64,
 }
+
+/// Extrusion of a family document as a solid (§8.11): profile in the sketch plane (O, X, Y, N),
+/// swept along N from `end` to `start` (feet, family coordinates).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ExtrusionSolid {
+    pub id: u64,
+    /// Void (cutting) form; `None` when the body is too short to say.
+    pub void: Option<bool>,
+    pub sketch: u64,
+    pub start: f64,
+    pub end: f64,
+    #[serde(rename = "O")]
+    pub o: [f64; 3],
+    #[serde(rename = "X")]
+    pub x: [f64; 3],
+    #[serde(rename = "Y")]
+    pub y: [f64; 3],
+    #[serde(rename = "N")]
+    pub n: [f64; 3],
+    pub profile: Vec<Curve>,
+    /// Host block of a face-based template (step 923).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_block: Option<bool>,
+    /// Sketch ids referenced by the shape body, in order (step 804).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sketches: Option<Vec<u64>>,
+}

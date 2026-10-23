@@ -45,3 +45,12 @@ pub fn version64(code: u16) -> Option<u16> {
 pub fn version32(code: u16) -> Option<u16> {
     VERSIONS32.iter().find(|(c, _)| *c == code).map(|(_, v)| *v)
 }
+
+/// Tag of canonical class `t` as the reference's shape table sees it (step 1352): versions with a
+/// translation table only know the translated classes; versions without one use `t` itself.
+pub fn mapped_tag(version: Option<u16>, t: u16) -> Option<u16> {
+    match version.and_then(|v| tables().get(&v)) {
+        Some(vt) => vt.map.get(&t).copied(),
+        None => Some(t),
+    }
+}

@@ -15,6 +15,8 @@ TOL = float(os.environ.get("RVT_PARITY_TOL", "0"))
 CATALOG = {"wall_types"}
 # optional: compare only these record keys (comma separated), for lists whose other keys are not ported yet
 KEYS = set(filter(None, os.environ.get("RVT_PARITY_KEYS", "").split(",")))
+# "family": compare the top-level list of family (non-project) chains instead of project.<list>
+SCOPE = os.environ.get("RVT_PARITY_SCOPE", "project")
 
 
 def same(a, b):
@@ -51,9 +53,16 @@ def compare(exe, name, ref_path, rvt):
         return n, bad
     for p in ref["partitions"]:
         for c in p["chains"]:
-            if c.get("virtual_family") is not None or not isinstance(c.get("project"), dict):
+            if c.get("virtual_family") is not None or c["index"] >= 1000:
                 continue
-            want = c["project"].get(name) or []
+            if SCOPE == "family":
+                if isinstance(c.get("project"), dict) or isinstance(c.get("document"), dict):
+                    continue
+                want = c.get(name) or []
+            elif not isinstance(c.get("project"), dict):
+                continue
+            else:
+                want = c["project"].get(name) or []
             got = rust.get((p["stream"], c["index"]))
             if got is None:
                 if want:

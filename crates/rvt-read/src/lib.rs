@@ -8,6 +8,7 @@ mod levels;
 mod mep;
 mod railings;
 mod slabs;
+mod solids;
 mod stairs;
 mod util;
 mod walls;
@@ -443,6 +444,22 @@ impl Document {
     /// Symbol (family type) id -> family id (step 494; reference `catalog.symbol_family`).
     pub fn symbol_family(&self) -> HashMap<u64, u64> {
         families::symbol_family(&self.partitions)
+    }
+
+    /// Extrusion solids of every family (non-project) chain, keyed by (partition stream, chain
+    /// index); reference `solids` of family chains (§8.11).
+    pub fn family_solids_by_chain(&self) -> Vec<(String, usize, Vec<rvt_model::ExtrusionSolid>)> {
+        let proj: HashSet<(usize, usize)> = self.project.iter().chain(self.document.iter()).copied().collect();
+        let mut out = Vec::new();
+        for (pi, p) in self.partitions.iter().enumerate() {
+            for (ci, ch) in p.chains.iter().enumerate() {
+                if ch.bits.is_none() || proj.contains(&(pi, ci)) {
+                    continue;
+                }
+                out.push((p.stream.clone(), ch.index, solids::extrusion_solids(ch)));
+            }
+        }
+        out
     }
 
     pub fn stairs(&self) -> Vec<Stair> {
