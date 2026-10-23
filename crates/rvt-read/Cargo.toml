@@ -1,0 +1,11 @@
+[package]
+name = "rvt-read"
+description = "Semantic readers: elements of a Revit file to the neutral model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rvt-core.workspace = true
+rvt-model.workspace = true

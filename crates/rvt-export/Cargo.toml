@@ -1,0 +1,10 @@
+[package]
+name = "rvt-export"
+description = "Writers from the neutral model to IFC, STEP and DXF"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rvt-model.workspace = true

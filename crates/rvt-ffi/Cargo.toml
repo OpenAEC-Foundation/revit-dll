@@ -1,0 +1,17 @@
+[package]
+name = "rvt-ffi"
+description = "C ABI of the RVT reader (rvt.dll)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "rvt"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rvt-read.workspace = true
+rvt-model.workspace = true
+rvt-export.workspace = true
+serde_json.workspace = true

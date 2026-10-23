@@ -1,0 +1,10 @@
+[package]
+name = "rvt-model"
+description = "Neutral, queryable building model produced by the RVT reader"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
