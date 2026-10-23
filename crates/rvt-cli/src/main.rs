@@ -2,10 +2,13 @@ use std::process::ExitCode;
 
 use serde_json::{json, Value};
 
-fn usage() -> ExitCode {
-    eprintln!("usage: rvt elements <file.rvt> [out.json]");
-    ExitCode::from(2)
-}
+const USAGE: &str = "usage:
+  rvt info <file.rvt>                  document facts
+  rvt element <file.rvt> <id>          one element
+  rvt category <file.rvt> <category>   elements of a built-in category (e.g. -2000011 = walls)
+  rvt levels <file.rvt>                levels per project chain
+  rvt elements <file.rvt>              element tables per partition and chain
+Each command prints JSON; add `-o out.json` to write a file instead.";
 
 /// Element tables per partition and chain, in the shape of the reference export
 /// (`partitions[].chains[].elements[] = {id, cat, tag, bbox}`).
@@ -34,28 +37,63 @@ fn elements(path: &str) -> rvt_core::Result<Value> {
     Ok(json!({"partitions": out}))
 }
 
+fn run(args: &[String]) -> Result<Value, String> {
+    let cmd = args.first().map(String::as_str).ok_or(USAGE)?;
+    let path = args.get(1).ok_or(USAGE)?;
+    let err = |e: rvt_core::Error| format!("{path}: {e}");
+    let to = |v: Result<Value, serde_json::Error>| v.map_err(|e| e.to_string());
+    match cmd {
+        "elements" => elements(path).map_err(err),
+        "info" => to(serde_json::to_value(rvt_read::Document::open(path).map_err(err)?.info())),
+        "element" => {
+            let id: u64 = args.get(2).and_then(|s| s.parse().ok()).ok_or(USAGE)?;
+            to(serde_json::to_value(rvt_read::Document::open(path).map_err(err)?.element(id)))
+        }
+        "category" => {
+            let cat: i32 = args.get(2).and_then(|s| s.parse().ok()).ok_or(USAGE)?;
+            let doc = rvt_read::Document::open(path).map_err(err)?;
+            to(serde_json::to_value(doc.elements_in_category(cat).collect::<Vec<_>>()))
+        }
+        "levels" => {
+            let doc = rvt_read::Document::open(path).map_err(err)?;
+            let chains: Vec<Value> = doc
+                .levels_by_chain()
+                .into_iter()
+                .map(|(s, i, l)| json!({"stream": s, "index": i, "levels": l}))
+                .collect();
+            Ok(json!({"chains": chains}))
+        }
+        _ => Err(USAGE.into()),
+    }
+}
+
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().collect();
-    match args.get(1).map(String::as_str) {
-        Some("elements") if args.len() >= 3 => match elements(&args[2]) {
-            Ok(v) => {
-                let s = serde_json::to_string(&v).expect("json");
-                match args.get(3) {
-                    Some(o) => std::fs::write(o, s).map(|_| ExitCode::SUCCESS).unwrap_or_else(|e| {
-                        eprintln!("{e}");
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let out = args.iter().position(|a| a == "-o").map(|i| {
+        let o = args.get(i + 1).cloned();
+        args.drain(i..(i + 2).min(args.len()));
+        o
+    });
+    match run(&args) {
+        Ok(v) => {
+            let s = serde_json::to_string(&v).expect("json");
+            match out.flatten() {
+                Some(o) => match std::fs::write(&o, s) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(e) => {
+                        eprintln!("{o}: {e}");
                         ExitCode::FAILURE
-                    }),
-                    None => {
-                        println!("{s}");
-                        ExitCode::SUCCESS
                     }
+                },
+                None => {
+                    println!("{s}");
+                    ExitCode::SUCCESS
                 }
             }
-            Err(e) => {
-                eprintln!("{path}: {e}", path = args[2]);
-                ExitCode::FAILURE
-            }
-        },
-        _ => usage(),
+        }
+        Err(m) => {
+            eprintln!("{m}");
+            ExitCode::from(2)
+        }
     }
 }

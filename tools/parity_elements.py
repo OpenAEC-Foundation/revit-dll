@@ -17,7 +17,7 @@ def key(c):
 def compare(exe, ref_path, rvt):
     with tempfile.TemporaryDirectory() as d:
         out = os.path.join(d, "rust.json")
-        r = subprocess.run([exe, "elements", rvt, out], capture_output=True, text=True)
+        r = subprocess.run([exe, "elements", rvt, "-o", out], capture_output=True, text=True)
         if r.returncode:
             return f"RUST FAILED: {r.stderr.strip()[:200]}"
         rust = json.load(open(out, encoding="utf-8"))

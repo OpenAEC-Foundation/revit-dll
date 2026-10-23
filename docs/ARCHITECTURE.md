@@ -28,8 +28,9 @@ A port counts as done only when the Rust output matches the reference export:
 | Layer | Status | Parity |
 |---|---|---|
 | Compound file, partitions, chains, section A/B, version tags | **done** | 100/100 rvt100 + 7 samples 2014/2015, ~1.12 M elements, 0 mismatches |
-| Semantic readers (≈ 200 lists of the reference export) | not started | — |
-| Query API | not started | — |
+| Levels (§18) | **done** | 111 files (rvt100 + 11 samples 2014/2015), 171 levels, 0 mismatches |
+| Other semantic readers (≈ 200 lists of the reference export) | not started | — |
+| Query API: `Document::open`, `info`, `element(id)`, `elements()`, `elements_in_category`, `levels` | **started** | CLI `rvt info/element/category/levels` |
 | Exporters | not started | — |
 | C ABI | stub | — |
 
