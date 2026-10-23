@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::f64::consts::PI;
 
-use rvt_model::{Curve, Instance, Segment, Stair};
+use rvt_model::{Curve, ExtrusionSolid, Instance, Segment, Stair};
 use rvt_read::Document;
 
 const FT: f64 = 0.3048;
@@ -229,8 +229,13 @@ fn sample(c: &Curve) -> Vec<P3> {
 /// Closed plan loops from a sketch's curves (endpoints chained within 1e-4 ft), sorted into
 /// (outer, holes) groups by containment.
 fn plan_loops(curves: &[Curve]) -> (Vec<Vec<Vec<[f64; 2]>>>, f64) {
-    let mut pieces: Vec<Vec<P3>> = curves.iter().map(sample).filter(|p| p.len() >= 2).collect();
+    let pieces: Vec<Vec<P3>> = curves.iter().map(sample).filter(|p| p.len() >= 2).collect();
     let z = pieces.first().map(|p| p[0][2]).unwrap_or(0.0);
+    (group_loops(pieces), z)
+}
+
+/// Chains polyline pieces (x, y used) into closed loops and groups them as (outer, holes...).
+fn group_loops(mut pieces: Vec<Vec<P3>>) -> Vec<Vec<Vec<[f64; 2]>>> {
     let close = |a: P3, b: P3| (a[0] - b[0]).abs() < 1e-4 && (a[1] - b[1]).abs() < 1e-4;
     let mut loops: Vec<Vec<[f64; 2]>> = Vec::new();
     while let Some(first) = pieces.pop() {
@@ -263,7 +268,68 @@ fn plan_loops(curves: &[Curve]) -> (Vec<Vec<Vec<[f64; 2]>>>, f64) {
             None => groups.push(vec![l]),
         }
     }
-    (groups, z)
+    groups
+}
+
+fn dot(a: P3, b: P3) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// Triangles of a family's extrusion solids placed by an instance (origin `o`, rotation rows `m`,
+/// step 2214: world[r] = o[r] + Σk m[3r+k]·p[k]), in model coordinates.
+fn family_triangles(solids: &[&ExtrusionSolid], o: P3, m: &[f64; 9]) -> Vec<[P3; 3]> {
+    let xf = |p: P3| -> P3 {
+        [
+            o[0] + m[0] * p[0] + m[1] * p[1] + m[2] * p[2],
+            o[1] + m[3] * p[0] + m[4] * p[1] + m[5] * p[2],
+            o[2] + m[6] * p[0] + m[7] * p[1] + m[8] * p[2],
+        ]
+    };
+    let mut out = Vec::new();
+    for s in solids {
+        let to2 = |p: P3| -> P3 {
+            let d = sub(p, s.o);
+            [dot(d, s.x), dot(d, s.y), 0.0]
+        };
+        let pieces: Vec<Vec<P3>> =
+            s.profile.iter().map(sample).filter(|p| p.len() >= 2).map(|v| v.into_iter().map(to2).collect()).collect();
+        let lift = |q: [f64; 2], t: f64| -> P3 { xf(add(add(s.o, add(mul(s.x, q[0]), mul(s.y, q[1]))), mul(s.n, t))) };
+        let (t0, t1) = (s.end.min(s.start), s.end.max(s.start));
+        if !(t1 > t0) {
+            continue;
+        }
+        for g in group_loops(pieces) {
+            if g.is_empty() || g[0].len() < 3 {
+                continue;
+            }
+            let mut flat = Vec::new();
+            let mut holes = Vec::new();
+            for (i, l) in g.iter().enumerate() {
+                if i > 0 {
+                    holes.push(flat.len() / 2);
+                }
+                for q in l {
+                    flat.extend_from_slice(q);
+                }
+            }
+            let pts: Vec<[f64; 2]> = g.iter().flatten().copied().collect();
+            if let Ok(tris) = earcutr::earcut(&flat, &holes, 2) {
+                for t in tris.chunks_exact(3) {
+                    let (a, b, c) = (pts[t[0]], pts[t[1]], pts[t[2]]);
+                    out.push([lift(a, t1), lift(b, t1), lift(c, t1)]);
+                    out.push([lift(a, t0), lift(c, t0), lift(b, t0)]);
+                }
+            }
+            for l in &g {
+                for i in 0..l.len() {
+                    let (a, b) = (l[i], l[(i + 1) % l.len()]);
+                    out.push([lift(a, t0), lift(b, t0), lift(b, t1)]);
+                    out.push([lift(a, t0), lift(b, t1), lift(a, t1)]);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Walk path of each run of a stair (sketch "path" lines, else the cached path), in run order.
@@ -576,6 +642,21 @@ pub fn scene(doc: &Document) -> Scene {
     }
 
     let insts: Vec<Instance> = doc.instances();
+    // Family geometry (§8.11, steps 2214–2216): extrusion solids of the instance's family, used when
+    // they cover the element's stored box (±0.15 ft); otherwise the box itself.
+    let symbol_family = doc.symbol_family();
+    let family_chain = doc.family_chains();
+    let chain_solids: std::collections::HashMap<(String, usize), Vec<ExtrusionSolid>> =
+        doc.family_solids_by_chain().into_iter().map(|(st, ix, v)| ((st, ix), v)).collect();
+    let solids_of = |sym: u64| -> Vec<&ExtrusionSolid> {
+        symbol_family
+            .get(&sym)
+            .and_then(|f| family_chain.get(f))
+            .and_then(|k| chain_solids.get(k))
+            .map(|v| v.iter().filter(|s| s.void != Some(true) && s.host_block.is_none()).collect())
+            .unwrap_or_default()
+    };
+    let (mut n_family, mut n_box) = (0usize, 0usize);
     for i in insts.iter().filter(|i| i.scale.is_none() && i.origin.is_some()) {
         let Some(e) = doc.element(i.id) else { continue };
         if e.view.is_some_and(|v| v != -1) {
@@ -595,9 +676,37 @@ pub fn scene(doc: &Document) -> Scene {
             continue; // panel box spanning a whole wall (see curtain_boxes above)
         }
         let (name, color) = instance_batch(i.cat);
+        if let (Some(sym), Some(o), Some(m)) = (i.symbol, i.origin, i.rotation) {
+            let sol = solids_of(sym);
+            if !sol.is_empty() {
+                let tris = family_triangles(&sol, o, &m);
+                let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+                for t in &tris {
+                    for p in t {
+                        for k in 0..3 {
+                            lo[k] = lo[k].min(p[k]);
+                            hi[k] = hi[k].max(p[k]);
+                        }
+                    }
+                }
+                let covers = !tris.is_empty() && (0..3).all(|k| (lo[k] - bb[k]).abs() < 0.15 && (hi[k] - bb[k + 3]).abs() < 0.15);
+                if covers {
+                    let b = batch!(name, color);
+                    for t in tris {
+                        b.tri(t[0], t[1], t[2]);
+                    }
+                    n_family += 1;
+                    continue;
+                }
+            }
+        }
+        n_box += 1;
         batch!(name, color).aabb(bb);
     }
 
+    if std::env::var_os("RVT_MESH_STATS").is_some() {
+        eprintln!("instances: {n_family} with family geometry, {n_box} as box");
+    }
     let mut out = Scene { batches: batches.into_values().filter(|b| !b.indices.is_empty()).collect(), ..Default::default() };
     let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
     for b in &out.batches {
