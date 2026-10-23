@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::f64::consts::PI;
 
-use rvt_model::{Curve, Instance, Segment};
+use rvt_model::{Curve, Instance, Segment, Stair};
 use rvt_read::Document;
 
 const FT: f64 = 0.3048;
@@ -266,6 +266,42 @@ fn plan_loops(curves: &[Curve]) -> (Vec<Vec<Vec<[f64; 2]>>>, f64) {
     (groups, z)
 }
 
+/// Walk path of each run of a stair (sketch "path" lines, else the cached path), in run order.
+fn run_paths(st: &Stair) -> Vec<Vec<P3>> {
+    st.runs
+        .iter()
+        .filter_map(|r| st.run_geometry.get(&r.to_string()))
+        .map(|g| {
+            let mut pts: Vec<P3> = Vec::new();
+            let mut push = |q: Vec<P3>| {
+                for p in q {
+                    if pts.last().map_or(true, |l: &P3| norm(sub(*l, p)) > 1e-9) {
+                        pts.push(p);
+                    }
+                }
+            };
+            match g.lines.get("path").filter(|c| !c.is_empty()) {
+                Some(curves) => curves.iter().for_each(|c| push(sample(c))),
+                None => {
+                    for seg in g.path_cached.iter().flatten() {
+                        match (seg.p0, seg.p1, &seg.points) {
+                            (Some(a), Some(b), _) => push(vec![a, b]),
+                            (_, _, Some(ps)) => push(ps.clone()),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            pts
+        })
+        .filter(|p| p.len() >= 2)
+        .collect()
+}
+
+fn polyline_len(p: &[P3]) -> f64 {
+    p.windows(2).map(|s| norm(sub([s[1][0], s[1][1], 0.0], [s[0][0], s[0][1], 0.0]))).sum()
+}
+
 fn instance_batch(cat: i32) -> (&'static str, [f32; 3]) {
     match cat {
         -2000023 => ("Doors", [0.71, 0.53, 0.35]),
@@ -353,6 +389,50 @@ pub fn scene(doc: &Document) -> Scene {
     // 3 ft apart. The base is the railing's level plus its base offset when it has a level
     // (steps 2200, 2202: the path z is sometimes 0 for a railing on an upper level); otherwise
     // the path z.
+    // Stairs (§33): per run, one block per tread along the walk path, each a riser high, 3 ft wide
+    // (the run width is not read yet); rising by one riser per tread from the stair base.
+    let stairs = doc.stairs();
+    for st in &stairs {
+        let Some(zb) = st.base_z else { continue };
+        if !(st.riser > 0.0 && st.tread > 0.0) {
+            continue;
+        }
+        let b = batch!("Stairs", [0.70, 0.66, 0.60]);
+        let mut k = 0usize;
+        for path in run_paths(st) {
+            let len = polyline_len(&path);
+            let n = ((len / st.tread).round() as usize).max(1);
+            // points at equal steps along the path
+            let at = |t: f64| -> P3 {
+                let mut rest = t * len;
+                for s in path.windows(2) {
+                    let l = norm(sub([s[1][0], s[1][1], 0.0], [s[0][0], s[0][1], 0.0]));
+                    if rest <= l || l == 0.0 {
+                        let f = if l > 0.0 { rest / l } else { 0.0 };
+                        return add(s[0], mul(sub(s[1], s[0]), f));
+                    }
+                    rest -= l;
+                }
+                *path.last().expect("non-empty")
+            };
+            for i in 0..n {
+                if k as i64 >= st.risers {
+                    break;
+                }
+                let (a, c) = (at(i as f64 / n as f64), at((i + 1) as f64 / n as f64));
+                let z0 = zb + st.riser * k as f64;
+                let Some(dir) = unit(sub([c[0], c[1], 0.0], [a[0], a[1], 0.0])) else { continue };
+                let w = mul([-dir[1], dir[0], 0.0], 1.5);
+                let (a, c) = ([a[0], a[1], z0], [c[0], c[1], z0]);
+                let (a0, a1, c0, c1) = (sub(a, w), add(a, w), sub(c, w), add(c, w));
+                let up = [0.0, 0.0, st.riser];
+                b.hexa([a0, c0, c1, a1], [add(a0, up), add(c0, up), add(c1, up), add(a1, up)]);
+                k += 1;
+            }
+        }
+    }
+    let stair_by_id: std::collections::HashMap<u64, &Stair> = stairs.iter().map(|s| (s.id, s)).collect();
+
     let bits32 = doc.info().bits == Some(32);
     for r in doc.railings() {
         let info = r.type_info.as_ref();
@@ -367,9 +447,34 @@ pub fn scene(doc: &Document) -> Scene {
             (Some(z), Some(pz)) => z + r.base_offset.unwrap_or(0.0) - pz,
             _ => 0.0,
         };
+        let mut polys: Vec<Vec<P3>> = r.path.iter().map(|c| sample(c).into_iter().map(|p| [p[0], p[1], p[2] + dz]).collect()).collect();
+        // step 2207: a stair railing rises from the stair base at the end nearest a run start (p0)
+        // to the stair top at the other end, linearly along the path
+        if let Some(st) = r.host.and_then(|h| stair_by_id.get(&(h as u64))) {
+            let p0s: Vec<P3> = run_paths(st).iter().map(|p| p[0]).collect();
+            let all: Vec<P3> = polys.iter().flatten().copied().collect();
+            if let (Some(zb), Some(&first), Some(&last)) = (st.base_z, all.first(), all.last()) {
+                if !p0s.is_empty() && st.height > 0.0 {
+                    let d = |a: P3| p0s.iter().map(|q| norm(sub([a[0], a[1], 0.0], [q[0], q[1], 0.0]))).fold(f64::INFINITY, f64::min);
+                    let low_first = d(first) <= d(last);
+                    let total: f64 = polys.iter().map(|p| polyline_len(p)).sum();
+                    let mut acc = 0.0;
+                    for poly in polys.iter_mut() {
+                        let mut prev: Option<P3> = None;
+                        for p in poly.iter_mut() {
+                            if let Some(q) = prev {
+                                acc += norm(sub([p[0], p[1], 0.0], [q[0], q[1], 0.0]));
+                            }
+                            prev = Some(*p);
+                            let f = if total > 0.0 { acc / total } else { 0.0 };
+                            p[2] = zb + st.height * if low_first { f } else { 1.0 - f };
+                        }
+                    }
+                }
+            }
+        }
         let b = batch!("Railings", [0.45, 0.47, 0.50]);
-        for c in &r.path {
-            let pts: Vec<P3> = sample(c).into_iter().map(|p| [p[0], p[1], p[2] + dz]).collect();
+        for pts in polys {
             let mut posts = pts.first().copied().into_iter().collect::<Vec<P3>>();
             let mut since = 0.0;
             for s in pts.windows(2) {
