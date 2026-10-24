@@ -15,6 +15,7 @@ const USAGE: &str = "usage:
   rvt stairs <file.rvt>                component stairs (riser, tread, levels, height, runs)
   rvt legacy_stairs <file.rvt>         old sketch-based stairs (levels, type, sketch lines)
   rvt topography <file.rvt>            topography surfaces (terrain points)
+  rvt type_values <file.rvt>           type values (value sets) per symbol
   rvt flex|mep_curves <file.rvt>       flex ducts; pipes, trays, conduits, flex pipes
   rvt columns <file.rvt>               columns: level block and height
   rvt inplace_members <file.rvt>       content of in-place families
@@ -159,6 +160,21 @@ fn run(args: &[String]) -> Result<Value, String> {
             let doc = rvt_read::Document::open(path).map_err(err)?;
             let chains: Vec<Value> =
                 doc.mep_curves_by_chain().into_iter().map(|(s, i, v)| json!({"stream": s, "index": i, "mep_curves": v})).collect();
+            Ok(json!({"chains": chains}))
+        }
+        "type_values" => {
+            let doc = rvt_read::Document::open(path).map_err(err)?;
+            let chains: Vec<Value> = doc
+                .type_values_by_chain()
+                .into_iter()
+                .map(|(s, i, v)| {
+                    let m: serde_json::Map<String, Value> = v
+                        .into_iter()
+                        .map(|(k, vs)| (k.to_string(), json!({"type": vs.type_name, "rows": vs.rows.iter().map(|r| json!({"param": r.param, "num": r.num, "elem": r.elem, "text": r.text})).collect::<Vec<_>>()})))
+                        .collect();
+                    json!({"stream": s, "index": i, "type_values": m})
+                })
+                .collect();
             Ok(json!({"chains": chains}))
         }
         "topography" => {

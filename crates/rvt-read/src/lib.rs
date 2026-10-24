@@ -10,6 +10,7 @@ mod instances;
 mod levels;
 mod mep;
 mod pads;
+mod params;
 mod railings;
 mod slabs;
 mod solids;
@@ -490,6 +491,44 @@ impl Document {
     pub fn mep_curves_by_chain(&self) -> Vec<(String, usize, Vec<rvt_model::MepCurve>)> {
         let sys = self.system_ids();
         self.project_chains().map(|(p, ch)| (p.stream.clone(), ch.index, mep::mep_curves(ch, &sys))).collect()
+    }
+
+    /// Type values (§9.2) of the symbols in each project chain: symbol id -> value set (the last
+    /// set per owner, like the reference `type_values`).
+    pub fn type_values_by_chain(&self) -> Vec<(String, usize, std::collections::BTreeMap<u64, rvt_model::ValueSet>)> {
+        self.project_chains()
+            .map(|(p, ch)| {
+                let prm: HashSet<u64> = params::parameter_names(ch).into_keys().collect();
+                let sets = params::value_sets(ch, &prm, &[2022]);
+                (p.stream.clone(), ch.index, sets.into_iter().map(|s| (s.owner, s)).collect())
+            })
+            .collect()
+    }
+
+    /// Parameter names (§9.1) of a chain, by ParameterElement id.
+    pub fn parameter_names_of(&self, stream: &str, index: usize) -> HashMap<u64, Option<String>> {
+        self.partitions
+            .iter()
+            .filter(|p| p.stream == stream)
+            .flat_map(|p| p.chains.iter().filter(|c| c.index == index && c.bits.is_some()))
+            .map(params::parameter_names)
+            .next()
+            .unwrap_or_default()
+    }
+
+    /// Value sets (§9.2) of the Family and FamilySymbol records of one chain (for a family chain:
+    /// its own defaults and its nested types).
+    pub fn value_sets_of(&self, stream: &str, index: usize) -> Vec<rvt_model::ValueSet> {
+        self.partitions
+            .iter()
+            .filter(|p| p.stream == stream)
+            .flat_map(|p| p.chains.iter().filter(|c| c.index == index && c.bits.is_some()))
+            .map(|ch| {
+                let prm: HashSet<u64> = params::parameter_names(ch).into_keys().collect();
+                params::value_sets(ch, &prm, &[1967, 2022])
+            })
+            .next()
+            .unwrap_or_default()
     }
 
     /// Topography surfaces per project chain (step 1532).

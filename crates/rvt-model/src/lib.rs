@@ -641,3 +641,21 @@ pub struct MepCurve {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub level: Option<i64>,
 }
+
+/// One row of a value set (§9.2): parameter, number, element reference and text.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ValueRow {
+    pub param: i64,
+    pub num: f64,
+    pub elem: i64,
+    pub text: String,
+}
+
+/// Value set of a Family or FamilySymbol body (§9.2): the type values.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ValueSet {
+    pub owner: u64,
+    #[serde(rename = "type")]
+    pub type_name: String,
+    pub rows: Vec<ValueRow>,
+}
