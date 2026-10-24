@@ -214,6 +214,31 @@ impl Document {
         Some(self.info_of(pi, ci, &self.partitions[pi].chains[ci].elements[ei]))
     }
 
+    /// Step 2260: Phase Created / Phase Demolished of any project element: the first i64 (32-bit:
+    /// i32) in the header area (64-bit @96..124, 32-bit @70..96) that is a Phase, followed by a
+    /// Phase or −1 (walls @102/@110, floors @104/@112; snowdon arch 2025 legend floors: created =
+    /// demolished = 'Legends', not shown in {3D}).
+    pub fn element_phases(&self) -> HashMap<u64, (i64, Option<i64>)> {
+        let mut out = HashMap::new();
+        for (_, ch) in self.project_chains() {
+            let bits32 = ch.bits == Some(32);
+            let (w, lo, hi) = if bits32 { (4, 70, 96) } else { (8, 96, 124) };
+            let rd = |b: &[u8], o: usize| if bits32 { util::i32_at(b, o) as i64 } else { util::i64_at(b, o) };
+            for e in ch.elements.iter().filter(|e| e.cat != CAT_PHASES) {
+                let b = ch.body(e);
+                let end = hi.min(b.len().saturating_sub(2 * w - 1));
+                if let Some(o) = (lo..end).find(|&o| self.phases.contains(&rd(b, o)) && {
+                    let d = rd(b, o + w);
+                    d == -1 || self.phases.contains(&d)
+                }) {
+                    let d = rd(b, o + w);
+                    out.entry(e.id).or_insert((rd(b, o), (d != -1).then_some(d)));
+                }
+            }
+        }
+        out
+    }
+
     /// Raw record body of an element (for format analysis).
     pub fn element_body(&self, id: u64) -> Option<Vec<u8>> {
         let &(pi, ci, ei) = self.index.get(&id)?;

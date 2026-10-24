@@ -770,7 +770,11 @@ pub fn scene(doc: &Document) -> Scene {
     // group is none of the type's placed groups (Revit API: snowdon arch 2025 282/282 members of
     // groups outside GroupType.Groups and outside the Group collector; rac_basic fixture 800336, rme
     // 6 pipe insulations: absent from Revit's {3D} geometry).
-    let group_defs = doc.group_definition_ids();
+    let mut group_defs = doc.group_definition_ids();
+    // Step 2260: demolished elements (Phase Demolished set) are not shown in a {3D} view of the last
+    // phase with 'Show Complete' (snowdon arch 2025: 6 legend floors, created = demolished = 'Legends';
+    // rac/rme/rst 2026: no element demolished, every element of Revit's geometry has a phase).
+    group_defs.extend(doc.element_phases().into_iter().filter(|(_, (_, d))| d.is_some()).map(|(id, _)| id));
     // step 2227: the expensive readers once
     let walls_all = {
         // step 2228: one record per id (a wall can appear in two project chains)
