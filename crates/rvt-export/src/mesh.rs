@@ -1753,7 +1753,9 @@ pub fn scene(doc: &Document) -> Scene {
                     .flatten()
                     // otherwise the unscaled family shape when it lies inside the stored box
                     .or_else(|| {
-                        let inside = (0..3).all(|k| lo[k] >= bb[k] - 0.15 && hi[k] <= bb[k + 3] + 0.15);
+                        // step 2245: 0.5 ft margin (rac_basic parking items on the sloped terrain: the
+                        // unscaled shape matches Revit in plan but stands 0.42 ft above the stored box)
+                        let inside = (0..3).all(|k| lo[k] >= bb[k] - 0.5 && hi[k] <= bb[k + 3] + 0.5);
                         // doors and windows: the stored box includes the swing, so it is no fallback
                         let opening = matches!(i.cat, -2000023 | -2000014);
                         (!covers && (inside || opening) && !world.is_empty()).then(|| world.clone())
