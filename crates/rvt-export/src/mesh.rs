@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::f64::consts::PI;
 
-use rvt_model::{Curve, ExtrusionSolid, Instance, Segment, Stair};
+use rvt_model::{Curve, ExtrusionSolid, Instance, Segment, Stair, SweepSolid};
 use rvt_read::Document;
 
 const FT: f64 = 0.3048;
@@ -288,6 +288,127 @@ fn place(o: P3, m: &[f64; 9], p: P3) -> P3 {
         o[1] + m[3] * p[0] + m[4] * p[1] + m[5] * p[2],
         o[2] + m[6] * p[0] + m[7] * p[1] + m[8] * p[2],
     ]
+}
+
+/// Rotation of `v` about the unit axis `k` by `a` (Rodrigues).
+fn rotate(v: P3, k: P3, a: f64) -> P3 {
+    let (c, s) = (a.cos(), a.sin());
+    let kv = cross(k, v);
+    let kd = dot(k, v);
+    [
+        v[0] * c + kv[0] * s + k[0] * kd * (1.0 - c),
+        v[1] * c + kv[1] * s + k[1] * kd * (1.0 - c),
+        v[2] * c + kv[2] * s + k[2] * kd * (1.0 - c),
+    ]
+}
+
+/// Chains curve polylines into one path (endpoints within 1e-3 ft), in order.
+fn chain_path(curves: &[Curve]) -> Vec<P3> {
+    let mut pieces: Vec<Vec<P3>> = curves.iter().map(sample).filter(|p| p.len() >= 2).collect();
+    let close = |a: P3, b: P3| norm(sub(a, b)) < 1e-3;
+    let Some(mut path) = pieces.pop() else { return vec![] };
+    loop {
+        let end = *path.last().expect("non-empty");
+        let start = path[0];
+        if let Some(k) = pieces.iter().position(|p| close(p[0], end) || close(*p.last().expect("non-empty"), end)) {
+            let mut next = pieces.swap_remove(k);
+            if !close(next[0], end) {
+                next.reverse();
+            }
+            path.extend(next.into_iter().skip(1));
+        } else if let Some(k) = pieces.iter().position(|p| close(p[0], start) || close(*p.last().expect("non-empty"), start)) {
+            let mut next = pieces.swap_remove(k);
+            if close(next[0], start) {
+                next.reverse();
+            }
+            next.pop();
+            next.extend(path);
+            path = next;
+        } else {
+            break;
+        }
+    }
+    path
+}
+
+/// §8.12 (step 2221): sweep triangles in family coordinates. The profile curves lie in 3D on the
+/// path at P(s0) (the path point nearest the profile centroid); per path segment the profile is
+/// placed as P + R_N(θ(segment) − θ(s0))·(q − P(s0)), θ = tangent angle in the path plane.
+fn sweep_triangles(s: &SweepSolid) -> Vec<[P3; 3]> {
+    let path = chain_path(&s.path);
+    let prof: Vec<Vec<P3>> = s.profile.iter().map(sample).filter(|p| p.len() >= 2).collect();
+    let all: Vec<P3> = prof.iter().flatten().copied().collect();
+    if path.len() < 2 || all.len() < 3 {
+        return vec![];
+    }
+    let n = s.n;
+    let cen = mul(all.iter().fold([0.0; 3], |a, p| add(a, *p)), 1.0 / all.len() as f64);
+    // nearest point on the path to the profile centroid, with its segment direction
+    let (mut best, mut p0, mut d0) = (f64::INFINITY, path[0], sub(path[1], path[0]));
+    for w in path.windows(2) {
+        let d = sub(w[1], w[0]);
+        let l2 = dot(d, d);
+        if l2 < 1e-18 {
+            continue;
+        }
+        let t = (dot(sub(cen, w[0]), d) / l2).clamp(0.0, 1.0);
+        let q = add(w[0], mul(d, t));
+        let dist = norm(sub(cen, q));
+        if dist < best {
+            (best, p0, d0) = (dist, q, d);
+        }
+    }
+    let theta = |d: P3| dot(d, s.y).atan2(dot(d, s.x));
+    let th0 = theta(d0);
+    // profile loops in the profile plane (normal = path tangent at s0)
+    let Some(t0) = unit(d0) else { return vec![] };
+    let u = unit(cross(n, t0)).unwrap_or(s.x);
+    let v = cross(t0, u);
+    let pieces: Vec<Vec<P3>> = prof.iter().map(|pc| pc.iter().map(|q| { let r = sub(*q, p0); [dot(r, u), dot(r, v), 0.0] }).collect()).collect();
+    let groups = group_loops(pieces, true);
+    let mut out = Vec::new();
+    for w in path.windows(2) {
+        let d = sub(w[1], w[0]);
+        if norm(d) < 1e-9 {
+            continue;
+        }
+        let a = theta(d) - th0;
+        // profile point (u, v) relative to P(s0), rotated about N and moved to the path point
+        let place = |base: P3, q: [f64; 2]| -> P3 { add(base, rotate(add(mul(u, q[0]), mul(v, q[1])), n, a)) };
+        for g in &groups {
+            if g.is_empty() || g[0].len() < 3 {
+                continue;
+            }
+            // project w[0] onto the sweep line through p0 rotated: the segment start relative to p0
+            let (b0, b1) = (w[0], w[1]);
+            for l in g {
+                for i in 0..l.len() {
+                    let (qa, qb) = (l[i], l[(i + 1) % l.len()]);
+                    out.push([place(b0, qa), place(b0, qb), place(b1, qb)]);
+                    out.push([place(b0, qa), place(b1, qb), place(b1, qa)]);
+                }
+            }
+            let mut flat = Vec::new();
+            let mut holes = Vec::new();
+            for (i, l) in g.iter().enumerate() {
+                if i > 0 {
+                    holes.push(flat.len() / 2);
+                }
+                for q in l {
+                    flat.extend_from_slice(q);
+                }
+            }
+            let pts: Vec<[f64; 2]> = g.iter().flatten().copied().collect();
+            if let Ok(tris) = earcutr::earcut(&flat, &holes, 2) {
+                for t in tris.chunks_exact(3) {
+                    let (qa, qb, qc) = (pts[t[0]], pts[t[1]], pts[t[2]]);
+                    out.push([place(b0, qa), place(b0, qc), place(b0, qb)]);
+                    out.push([place(b1, qa), place(b1, qb), place(b1, qc)]);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Triangles of a family's extrusion solids in family (local) coordinates.
@@ -656,12 +777,22 @@ pub fn scene(doc: &Document) -> Scene {
     let family_chain = doc.family_chains();
     let chain_solids: std::collections::HashMap<(String, usize), Vec<ExtrusionSolid>> =
         doc.family_solids_by_chain().into_iter().map(|(st, ix, v)| ((st, ix), v)).collect();
+    let chain_sweeps: std::collections::HashMap<(String, usize), Vec<SweepSolid>> =
+        doc.family_sweeps_by_chain().into_iter().map(|(st, ix, v)| ((st, ix), v)).collect();
     let solids_of = |sym: u64| -> Vec<&ExtrusionSolid> {
         symbol_family
             .get(&sym)
             .and_then(|f| family_chain.get(f))
             .and_then(|k| chain_solids.get(k))
             .map(|v| v.iter().filter(|s| s.void != Some(true) && s.host_block.is_none()).collect())
+            .unwrap_or_default()
+    };
+    let sweeps_of = |sym: u64| -> Vec<&SweepSolid> {
+        symbol_family
+            .get(&sym)
+            .and_then(|f| family_chain.get(f))
+            .and_then(|k| chain_sweeps.get(k))
+            .map(|v| v.iter().filter(|s| s.void != Some(true)).collect())
             .unwrap_or_default()
     };
     let (mut n_family, mut n_box) = (0usize, 0usize);
@@ -693,8 +824,12 @@ pub fn scene(doc: &Document) -> Scene {
         let (name, color) = instance_batch(i.cat);
         if let (Some(sym), Some(o), Some(m)) = (i.symbol, i.origin, i.rotation) {
             let sol = solids_of(sym);
-            if !sol.is_empty() {
-                let local = family_triangles(&sol);
+            let swp = sweeps_of(sym);
+            if !sol.is_empty() || !swp.is_empty() {
+                let mut local = family_triangles(&sol);
+                for sw in &swp {
+                    local.extend(sweep_triangles(sw));
+                }
                 if std::env::var("RVT_MESH_DEBUG").ok().and_then(|v| v.parse::<u64>().ok()) == Some(i.id) {
                     eprintln!("debug {}: {} solids, {} local triangles, bbox {:?}", i.id, sol.len(), local.len(), bb);
                 }
