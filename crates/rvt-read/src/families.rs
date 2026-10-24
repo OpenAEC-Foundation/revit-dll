@@ -115,16 +115,19 @@ fn scan_family_keys(
 /// (steps 494, 1350, 1953).
 pub(crate) fn symbol_family(parts: &[Partition]) -> HashMap<u64, u64> {
     let chains: Vec<&rvt_core::Chain> = parts.iter().filter_map(|p| p.chains.first().filter(|c| c.bits.is_some())).collect();
-    symbol_family_in(&chains)
+    symbol_family_in(&chains, false)
 }
 
 /// Step 2246: symbols of nested families (in family chains, index > 0) -> family, by the same rule.
 pub(crate) fn nested_symbol_family(parts: &[Partition]) -> HashMap<u64, u64> {
     let chains: Vec<&rvt_core::Chain> = parts.iter().flat_map(|p| p.chains.iter().skip(1).filter(|c| c.bits.is_some())).collect();
-    symbol_family_in(&chains)
+    symbol_family_in(&chains, true)
 }
 
-fn symbol_family_in(chains: &[&rvt_core::Chain]) -> HashMap<u64, u64> {
+/// `skip_header`: in a family chain the header slot (64-bit @76, 32-bit @60) of every record holds
+/// the document's own Family; the symbol's family follows later in the body (rac_basic solar panel
+/// symbol 1043463: own family 1043002 @76, its family 1044075 @467).
+fn symbol_family_in(chains: &[&rvt_core::Chain], skip_header: bool) -> HashMap<u64, u64> {
     let mut fams: Vec<u64> = Vec::new();
     for ch in chains {
         let ft = vtag(ch.version, TAG_FAMILY);
@@ -145,11 +148,11 @@ fn symbol_family_in(chains: &[&rvt_core::Chain]) -> HashMap<u64, u64> {
             let fid = if bits32 {
                 // a family found anywhere implies a hit at that offset; earliest i32 id >= 0x10000, else the earliest
                 let hits: Vec<i64> =
-                    (0..b.len().saturating_sub(3)).map(|o| i32_at(b, o) as i64).filter(|v| fset.contains(v)).collect();
+                    (if skip_header { 80 } else { 0 }..b.len().saturating_sub(3)).map(|o| i32_at(b, o) as i64).filter(|v| fset.contains(v)).collect();
                 hits.iter().copied().find(|&v| v >= 0x10000).or(hits.first().copied()).map(|v| v as u64)
             } else {
                 // the family that comes first in file order among those whose id occurs in the body
-                (0..b.len().saturating_sub(7)).filter_map(|o| fam_index.get(&i64_at(b, o)).copied()).min().map(|k| fams[k])
+                (if skip_header { 96 } else { 0 }..b.len().saturating_sub(7)).filter_map(|o| fam_index.get(&i64_at(b, o)).copied()).min().map(|k| fams[k])
             };
             if let Some(f) = fid {
                 out.insert(e.id, f);

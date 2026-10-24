@@ -1656,20 +1656,21 @@ pub fn scene(doc: &Document) -> Scene {
                     for sw in &swp {
                         all.extend(sweep_triangles(sw));
                     }
-                    // step 2246: nested families; candidates without them first, then with (a nested
-                    // part may be switched off by a visibility parameter): the cover test below picks a
-                    // nested candidate only when it alone matches the stored box
+                    // step 2246: nested families; candidates with them first (a shared nested component
+                    // is a separate instance: linked instances skip these, see `linked`)
                     let nested = chain_of_symbol(sym).map(|key| nested_tris(&key, 1, &chain_insts, &chain_of_symbol, &chain_forms)).unwrap_or_default();
                     let with = |x: &Vec<[P3; 3]>| -> Vec<[P3; 3]> { x.iter().chain(nested.iter()).copied().collect() };
                     let withs = if nested.is_empty() { vec![] } else { vec![with(&all), with(&no_sweeps), with(&ext_only)] };
+                    // nested candidates first; `plain_count` = how many come first (dropped for
+                    // instances linked to their shared components)
                     let mut c: Vec<Vec<[P3; 3]>> = Vec::new();
-                    for x in [all, no_sweeps, ext_only] {
+                    for x in withs {
                         if !x.is_empty() && !c.iter().any(|y| y.len() == x.len()) {
                             c.push(x);
                         }
                     }
                     plain_count.insert(sym, c.len());
-                    for x in withs {
+                    for x in [all, no_sweeps, ext_only] {
                         if !x.is_empty() && !c.iter().any(|y| y.len() == x.len()) {
                             c.push(x);
                         }
@@ -1739,8 +1740,8 @@ pub fn scene(doc: &Document) -> Scene {
                 .min_by(|a, b| a.0.total_cmp(&b.0))
                 .map(|(_, t)| t);
             // step 2246: shared nested components are separate instances: no nested shapes then
-            let take = if linked.contains(&i.id) { plain_count.get(&sym).copied().unwrap_or(usize::MAX) } else { usize::MAX };
-            let mut candidates: Vec<&Vec<[P3; 3]>> = best_alt.into_iter().chain(candidates.iter().take(take)).collect();
+            let skip = if linked.contains(&i.id) { plain_count.get(&sym).copied().unwrap_or(0) } else { 0 };
+            let mut candidates: Vec<&Vec<[P3; 3]>> = best_alt.into_iter().chain(candidates.iter().skip(skip)).collect();
 
             // step 2246: the first candidate that covers the stored box (±0.15 ft) goes first
             if let Some(k) = candidates.iter().position(|loc| {
@@ -1762,7 +1763,17 @@ pub fn scene(doc: &Document) -> Scene {
             if !candidates.is_empty() {
                 for local in candidates.iter() {
                 if std::env::var("RVT_MESH_DEBUG").ok().and_then(|v| v.parse::<u64>().ok()) == Some(i.id) {
-                    eprintln!("debug {}: {} local triangles, bbox {:?}", i.id, local.len(), bb);
+                    let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+                    for t in local.iter() {
+                        for q in t {
+                            let w = place(o, &m, *q);
+                            for j in 0..3 {
+                                lo[j] = lo[j].min(w[j]);
+                                hi[j] = hi[j].max(w[j]);
+                            }
+                        }
+                    }
+                    eprintln!("debug {}: {} local triangles, bbox {:.2?}, placed {:.2?} {:.2?}", i.id, local.len(), bb, lo, hi);
                 }
                 let bounds = |tris: &[[P3; 3]]| {
                     let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
