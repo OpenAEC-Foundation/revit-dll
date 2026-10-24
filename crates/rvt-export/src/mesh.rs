@@ -1745,6 +1745,22 @@ pub fn scene(doc: &Document) -> Scene {
     let mut shape_cache: std::collections::HashMap<u64, std::rc::Rc<Vec<Vec<[P3; 3]>>>> = std::collections::HashMap::new();
     let mut plain_count: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
     let linked = doc.sub_component_links();
+    // Step 2262: hosts of shared nested components: a linked instance whose stored box contains
+    // another linked instance's box. Their stored box is the union with the components (snowdon
+    // kitchen unit 908758: 8.5 × 4.9 × 5.3 ft, its own forms 4.5 × 2.1 × 2.8 ft = Revit's), so it
+    // is no size to fit to.
+    let linked_hosts: std::collections::HashSet<u64> = {
+        let boxes: Vec<(u64, [f64; 6])> = linked.iter().filter_map(|&id| doc.element(id).and_then(|e| e.bbox).map(|b| (id, b))).collect();
+        boxes
+            .iter()
+            .filter(|(i, a)| {
+                boxes.iter().any(|(j, b)| {
+                    j != i && (0..3).all(|k| b[k] >= a[k] - 0.05 && b[k + 3] <= a[k + 3] + 0.05) && (0..3).any(|k| b[k + 3] - b[k] < a[k + 3] - a[k] - 0.1)
+                })
+            })
+            .map(|(i, _)| *i)
+            .collect()
+    };
     let columns: std::collections::HashMap<u64, rvt_model::Column> = doc.columns().into_iter().map(|c| (c.id, c)).collect();
     // Step 2253: column type sizes. Type values per symbol (with the project chain for parameter
     // names) and, per family chain, its value sets (the family's types).
@@ -2187,7 +2203,7 @@ pub fn scene(doc: &Document) -> Scene {
                 // parameters). When the rotation is axis-aligned, fit the family shape per local axis
                 // to the element's stored box instead of falling back to the box.
                 let axis_aligned = m.iter().all(|v| v.abs() < 1e-6 || (v.abs() - 1.0).abs() < 1e-6);
-                let fitted: Option<Vec<[P3; 3]>> = (!covers && axis_aligned && !world.is_empty())
+                let fitted: Option<Vec<[P3; 3]>> = (!covers && axis_aligned && !world.is_empty() && !linked_hosts.contains(&i.id))
                     .then(|| {
                         // element box in local coordinates (m is a signed permutation: inverse = transpose)
                         let inv = |w: P3| -> P3 {
