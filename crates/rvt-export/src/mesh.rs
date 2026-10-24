@@ -1119,6 +1119,19 @@ pub fn scene(doc: &Document) -> Scene {
         let b = batch!("Pads", [0.66, 0.60, 0.52]);
         b.prism(loops, top - th, *top);
     }
+    // Stair landings (step 2241): a component stair's landing has no geometry of its own in the
+    // file, but its stored box matches Revit's landing (rac_basic 725396); a slab under the box top,
+    // at most 1 ft thick (Revit 0.98 ft)
+    for e in doc.elements_in_category(-2000920) {
+        let Some(bb) = e.bbox else { continue };
+        let ext = [bb[3] - bb[0], bb[4] - bb[1], bb[5] - bb[2]];
+        if ext.iter().any(|v| !(v.is_finite() && *v > 1e-3 && *v < 500.0)) {
+            continue;
+        }
+        let (z1, z0) = (bb[5], bb[5] - ext[2].min(1.0));
+        let bot = [[bb[0], bb[1], z0], [bb[3], bb[1], z0], [bb[3], bb[4], z0], [bb[0], bb[4], z0]];
+        batch!("Stairs", [0.70, 0.66, 0.60]).hexa(bot, bot.map(|v| [v[0], v[1], z1]));
+    }
     // Old sketch stairs (step 2231): run lines in walking order; the riser lines crossing a run,
     // sorted along it, each start a tread one riser high (rise = level difference / riser lines;
     // the last line of a run is the step onto the landing or floor). Landings: a slab along each
