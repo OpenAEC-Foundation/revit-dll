@@ -568,6 +568,31 @@ fn family_triangles(solids: &[&ExtrusionSolid]) -> Vec<[P3; 3]> {
     out
 }
 
+/// Walking surface of an old sketch stair (step 2232): a run's nosing line or a landing strip from
+/// `a` to `c` (plan), `half` wide to each side, at z0 (at `a`) rising to z1 (at `c`).
+#[derive(Clone, Copy)]
+struct WalkPiece {
+    a: P3,
+    c: P3,
+    half: f64,
+    z0: f64,
+    z1: f64,
+}
+
+impl WalkPiece {
+    /// (lateral excess, z) when the plan point lies on or beside this piece.
+    fn z_at(&self, p: P3) -> Option<(f64, f64)> {
+        let d = sub([self.c[0], self.c[1], 0.0], [self.a[0], self.a[1], 0.0]);
+        let len = norm(d);
+        let dir = unit(d)?;
+        let v = sub([p[0], p[1], 0.0], [self.a[0], self.a[1], 0.0]);
+        let t = dot(v, dir);
+        let lat = norm(sub(v, mul(dir, t)));
+        let ex = (lat - self.half).max(0.0);
+        (t > -0.3 && t < len + 0.3 && ex < 0.75).then(|| (ex, self.z0 + (self.z1 - self.z0) * (t / len).clamp(0.0, 1.0)))
+    }
+}
+
 /// Walk path of each run of a stair (sketch "path" lines, else the cached path), in run order.
 fn run_paths(st: &Stair) -> Vec<(u64, Vec<P3>)> {
     st.runs
@@ -825,24 +850,30 @@ pub fn scene(doc: &Document) -> Scene {
     // sorted along it, each start a tread one riser high (rise = level difference / riser lines;
     // the last line of a run is the step onto the landing or floor). Landings: a slab along each
     // landing centre line, as wide as the run, extended by half that width at joints.
+    // Step 2232: a multistory stair repeats per storey up to its multistory top level; the walking
+    // surfaces (story base, piece) are kept for the railings below.
+    // (storey base, piece, storey index, storeys, storey height)
+    let mut walk: Vec<(f64, WalkPiece, usize, usize, f64)> = Vec::new();
     for st in doc.legacy_stairs() {
         let (Some(zb), Some(zt)) = (st.base_z, st.top_z) else { continue };
         let empty = Vec::new();
         let get = |k: &str| st.lines.get(k).unwrap_or(&empty);
-        let (runs, risers, landings) = (get("run"), get("riser"), get("landing_center"));
         let lines = |cs: &Vec<rvt_model::Curve>| -> Vec<(P3, P3)> {
             cs.iter().filter_map(|c| Some(([c.p0?[0], c.p0?[1], 0.0], [c.p1?[0], c.p1?[1], 0.0]))).collect()
         };
-        let (runs, risers, landings) = (lines(runs), lines(risers), lines(landings));
+        let (runs, risers, landings) = (lines(get("run")), lines(get("riser")), lines(get("landing_center")));
         if risers.is_empty() || !(zt > zb) {
             continue;
         }
         let rise = (zt - zb) / risers.len() as f64;
-        let b = batch!("Stairs", [0.70, 0.66, 0.60]);
-        let up = [0.0, 0.0, rise];
+        let storey = zt - zb;
+        let storeys = st.multistory_top_z.map_or(1, |zm| (((zm - zb) / storey).round() as usize).clamp(1, 50));
+        // pieces relative to the stair base (z measured from zb)
+        let mut pieces: Vec<WalkPiece> = Vec::new();
+        let mut boxes: Vec<[P3; 4]> = Vec::new(); // bottom faces, z relative
         let mut k = 0usize;
         let mut half = 1.5;
-        let mut landing_z = Vec::new();
+        let mut first_landing: Option<f64> = None;
         for &(r0, r1) in &runs {
             let Some(dir) = unit(sub(r1, r0)) else { continue };
             let len = norm(sub(r1, r0));
@@ -857,22 +888,26 @@ pub fn scene(doc: &Document) -> Scene {
                 })
                 .collect();
             on.sort_by(|x, y| x.0.total_cmp(&y.0));
+            let k0 = k;
             for (j, &(t, (a, c))) in on.iter().enumerate() {
                 half = norm(sub(c, a)) / 2.0;
                 if let Some(&(t1, _)) = on.get(j + 1) {
-                    let z0 = zb + rise * k as f64;
+                    let z0 = rise * k as f64;
                     let w = mul([-dir[1], dir[0], 0.0], half);
                     let (p, q) = (add(r0, mul(dir, t)), add(r0, mul(dir, t1)));
                     let (p, q) = ([p[0], p[1], z0], [q[0], q[1], z0]);
-                    let bot = [sub(p, w), sub(q, w), add(q, w), add(p, w)];
-                    b.hexa(bot, bot.map(|v| add(v, up)));
+                    boxes.push([sub(p, w), sub(q, w), add(q, w), add(p, w)]);
                 }
                 k += 1;
             }
-            landing_z.push((zb + rise * (k as f64 - 1.0), half));
+            if let (Some(&(t0, _)), Some(&(t1, _))) = (on.first(), on.last()) {
+                // nosing line: top of the first tread up to the top of the landing or floor
+                pieces.push(WalkPiece { a: add(r0, mul(dir, t0)), c: add(r0, mul(dir, t1)), half, z0: rise * (k0 + 1) as f64, z1: rise * k as f64 });
+            }
+            first_landing.get_or_insert(rise * (k as f64 - 1.0));
         }
         // the landing after the first run (the slab top meets the step onto it)
-        if let Some(&(z0, half)) = landing_z.first() {
+        if let Some(z0) = first_landing {
             for (i, &(a, c)) in landings.iter().enumerate() {
                 let Some(dir) = unit(sub(c, a)) else { continue };
                 let joined = |p: P3| landings.iter().enumerate().any(|(j, &(x, y))| j != i && (norm(sub(x, p)) < 1e-3 || norm(sub(y, p)) < 1e-3));
@@ -880,9 +915,19 @@ pub fn scene(doc: &Document) -> Scene {
                 let c = if joined(c) { add(c, mul(dir, half)) } else { c };
                 let w = mul([-dir[1], dir[0], 0.0], half);
                 let (a, c) = ([a[0], a[1], z0], [c[0], c[1], z0]);
-                let bot = [sub(a, w), sub(c, w), add(c, w), add(a, w)];
-                b.hexa(bot, bot.map(|v| add(v, up)));
+                boxes.push([sub(a, w), sub(c, w), add(c, w), add(a, w)]);
+                pieces.push(WalkPiece { a, c, half, z0: z0 + rise, z1: z0 + rise });
             }
+        }
+        let b = batch!("Stairs", [0.70, 0.66, 0.60]);
+        for s in 0..storeys {
+            let base = zb + storey * s as f64;
+            let lift = |v: P3| [v[0], v[1], v[2] + base];
+            for bot in &boxes {
+                let bot = bot.map(lift);
+                b.hexa(bot, bot.map(|v| add(v, [0.0, 0.0, rise])));
+            }
+            walk.extend(pieces.iter().map(|p| (base, WalkPiece { z0: p.z0 + base, z1: p.z1 + base, ..*p }, s, storeys, storey)));
         }
     }
     let stair_by_id: std::collections::HashMap<u64, &Stair> = stairs.iter().map(|s| (s.id, s)).collect();
@@ -902,6 +947,33 @@ pub fn scene(doc: &Document) -> Scene {
             _ => 0.0,
         };
         let mut polys: Vec<Vec<P3>> = r.path.iter().map(|c| sample(c).into_iter().map(|p| [p[0], p[1], p[2] + dz]).collect()).collect();
+        // step 2232: railings over an old sketch stair (their host is a helper element, not the
+        // stair): a point above a run or landing of the same storey gets that walking surface; a
+        // railing on the first storey of a multistory stair repeats with it
+        if !r.host.is_some_and(|h| stair_by_id.contains_key(&(h as u64))) && !walk.is_empty() {
+            let mut repeat: Option<(usize, f64)> = None;
+            for poly in polys.iter_mut() {
+                for p in poly.iter_mut() {
+                    let best = walk
+                        .iter()
+                        .filter(|(base, ..)| (p[2] - base).abs() < 0.5)
+                        .filter_map(|(_, w, s, n, h)| w.z_at(*p).map(|(ex, z)| (ex, z, *s, *n, *h)))
+                        .min_by(|x, y| x.0.total_cmp(&y.0));
+                    if let Some((_, z, s, n, h)) = best {
+                        p[2] = z;
+                        if s == 0 && n > 1 {
+                            repeat = Some((n, h));
+                        }
+                    }
+                }
+            }
+            if let Some((n, h)) = repeat {
+                let first = polys.clone();
+                for i in 1..n {
+                    polys.extend(first.iter().map(|poly| poly.iter().map(|p| [p[0], p[1], p[2] + h * i as f64]).collect::<Vec<P3>>()));
+                }
+            }
+        }
         // step 2207: a stair railing rises from the stair base at the end nearest a run start (p0)
         // to the stair top at the other end, linearly along the path
         if let Some(st) = r.host.and_then(|h| stair_by_id.get(&(h as u64))) {

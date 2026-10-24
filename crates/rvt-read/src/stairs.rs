@@ -362,6 +362,8 @@ pub(crate) fn legacy_stairs(ch: &Chain, level_z: &HashMap<i64, f64>) -> Vec<Lega
             let k = (40..b.len().saturating_sub(2 * w).min(800)).find(|&o| lv.contains(&q(o)) && lv.contains(&q(o + w)));
             let ty = (40..b.len().saturating_sub(w).min(800)).map(q).find(|v| types.contains(v));
             let (bl, tl) = k.map_or((None, None), |k| (Some(q(k)), Some(q(k + w))));
+            // step 2232: the next word is the multistory top level (-1 = none)
+            let mt = k.filter(|k| k + 3 * w <= b.len()).map(|k| q(k + 2 * w)).filter(|v| lv.contains(v));
             LegacyStair {
                 id: e.id,
                 base_level: bl,
@@ -370,6 +372,8 @@ pub(crate) fn legacy_stairs(ch: &Chain, level_z: &HashMap<i64, f64>) -> Vec<Lega
                 base_z: bl.and_then(|l| level_z.get(&l).copied()),
                 top_z: tl.and_then(|l| level_z.get(&l).copied()),
                 lines: skl.get(&(e.id as i64)).cloned().unwrap_or_default(),
+                multistory_top_level: mt,
+                multistory_top_z: mt.and_then(|l| level_z.get(&l).copied()),
             }
         })
         .collect()

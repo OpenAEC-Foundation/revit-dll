@@ -526,4 +526,7 @@ pub struct LegacyStair {
     pub base_z: Option<f64>,
     pub top_z: Option<f64>,
     pub lines: std::collections::BTreeMap<&'static str, Vec<Curve>>,
+    /// Multistory top level (step 2232: the word after the top level; -1 = none).
+    pub multistory_top_level: Option<i64>,
+    pub multistory_top_z: Option<f64>,
 }
