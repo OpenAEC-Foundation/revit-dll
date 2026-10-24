@@ -526,6 +526,37 @@ impl Document {
             .collect()
     }
 
+    /// Step 2246 (§10): family id -> document chain for families nested in family documents.
+    pub fn nested_family_chains(&self) -> std::collections::BTreeMap<u64, (String, usize)> {
+        families::nested_family_chains(&self.partitions)
+            .into_iter()
+            .map(|(f, (q, xi))| (f, (self.partitions[q].stream.clone(), self.partitions[q].chains[xi].index)))
+            .collect()
+    }
+
+    /// Step 2246: symbol -> family for nested families (symbols in family chains).
+    pub fn nested_symbol_family(&self) -> HashMap<u64, u64> {
+        families::nested_symbol_family(&self.partitions)
+    }
+
+    /// Step 2246: project instances linked to another instance (shared nested components).
+    pub fn sub_component_links(&self) -> HashSet<u64> {
+        self.project_chains().flat_map(|(_, ch)| instances::sub_component_links(ch)).collect()
+    }
+
+    /// Step 2246: family instances placed inside family documents (nested families), per family
+    /// chain; placement in the host family's coordinates.
+    pub fn family_chain_instances(&self) -> Vec<(String, usize, Vec<Instance>)> {
+        let project: HashSet<(String, usize)> = self.project_chains().map(|(p, ch)| (p.stream.clone(), ch.index)).collect();
+        self.partitions
+            .iter()
+            .flat_map(|p| p.chains.iter().skip(1).filter(|c| c.bits.is_some()).map(move |ch| (p, ch)))
+            .filter(|(p, ch)| !project.contains(&(p.stream.clone(), ch.index)))
+            .map(|(p, ch)| (p.stream.clone(), ch.index, instances::instances(ch, &HashSet::new())))
+            .filter(|(_, _, v)| !v.is_empty())
+            .collect()
+    }
+
     /// Symbol (family type) id -> family id (step 494; reference `catalog.symbol_family`).
     pub fn symbol_family(&self) -> HashMap<u64, u64> {
         families::symbol_family(&self.partitions)

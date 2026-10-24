@@ -347,3 +347,26 @@ pub(crate) fn columns(ch: &Chain, level_z: &HashMap<i64, f64>) -> Vec<rvt_model:
     }
     out
 }
+
+/// Step 2246: family instances whose body references another family instance of the same chain:
+/// a host with shared nested components (rac_basic footing 512277 ↔ pile 512279, @187/@1271), or
+/// such a component itself. Those components are separate instances, so the host's nested family
+/// shapes must not be drawn a second time.
+pub(crate) fn sub_component_links(ch: &Chain) -> HashSet<u64> {
+    let Some(ti) = vtag(ch.version, TAG_INSTANCE) else { return HashSet::new() };
+    let insts: HashSet<i64> = ch.elements.iter().filter(|e| e.tag == Some(ti)).map(|e| e.id as i64).collect();
+    let bits32 = ch.bits == Some(32);
+    let w = if bits32 { 4 } else { 8 };
+    ch.elements
+        .iter()
+        .filter(|e| e.tag == Some(ti))
+        .filter(|e| {
+            let b = ch.body(e);
+            (0..b.len().saturating_sub(w - 1)).any(|o| {
+                let v = if bits32 { i32_at(b, o) as i64 } else { i64_at(b, o) };
+                v != e.id as i64 && insts.contains(&v)
+            })
+        })
+        .map(|e| e.id)
+        .collect()
+}

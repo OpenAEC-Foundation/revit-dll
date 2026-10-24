@@ -28,11 +28,48 @@ pub(crate) fn family_chains(parts: &[Partition]) -> BTreeMap<u64, (usize, usize)
     let mut best: HashMap<u64, ((usize, usize, usize), (usize, usize))> = HashMap::new();
     for (pi, p) in parts.iter().enumerate() {
         let Some(ch) = p.chains.first().filter(|c| c.bits.is_some()) else { continue };
+        scan_family_keys(ch, pi, 0, &keys, &prefixes, &mut best);
+    }
+    best.into_iter().map(|(f, (_, c))| (f, c)).collect()
+}
+
+/// Step 2246 (§10 nesting): families nested in a family document, i.e. Family records in a family
+/// chain (index > 0) whose body holds the key of another chain; same rule as `family_chains`.
+pub(crate) fn nested_family_chains(parts: &[Partition]) -> BTreeMap<u64, (usize, usize)> {
+    let mut keys: HashMap<[u8; 16], Vec<(usize, usize)>> = HashMap::new();
+    for (q, p) in parts.iter().enumerate() {
+        for (xi, x) in p.chains.iter().enumerate() {
+            if let Some(k) = x.key {
+                keys.entry(k).or_default().push((q, xi));
+            }
+        }
+    }
+    let prefixes: HashSet<u32> = keys.keys().map(|k| u32::from_le_bytes([k[0], k[1], k[2], k[3]])).collect();
+    let mut best: HashMap<u64, ((usize, usize, usize), (usize, usize))> = HashMap::new();
+    for (pi, p) in parts.iter().enumerate() {
+        for (xi, ch) in p.chains.iter().enumerate().skip(1).filter(|(_, c)| c.bits.is_some()) {
+            scan_family_keys(ch, pi, xi, &keys, &prefixes, &mut best);
+        }
+    }
+    best.into_iter().map(|(f, (_, c))| (f, c)).collect()
+}
+
+/// Family records of chain `ch` (partition `pi`, chain `self_xi`): the first key of another chain
+/// inside a family body names that family's document chain.
+fn scan_family_keys(
+    ch: &rvt_core::Chain,
+    pi: usize,
+    self_xi: usize,
+    keys: &HashMap<[u8; 16], Vec<(usize, usize)>>,
+    prefixes: &HashSet<u32>,
+    best: &mut HashMap<u64, ((usize, usize, usize), (usize, usize))>,
+) {
+    {
         let ft = vtag(ch.version, TAG_FAMILY);
         let mut fams: Vec<(usize, usize, u64)> =
             ch.elements.iter().filter(|e| e.tag.is_some() && e.tag == ft).map(|e| (e.body.0, e.body.0 + e.body.1, e.id)).collect();
         if fams.is_empty() {
-            continue;
+            return;
         }
         fams.sort();
         // family bodies do not overlap: the family containing i by binary search on the sorted starts
@@ -45,7 +82,7 @@ pub(crate) fn family_chains(parts: &[Partition]) -> BTreeMap<u64, (usize, usize)
         // first occurrence per key that lies in a family body
         let mut done: HashSet<[u8; 16]> = HashSet::new();
         if hi < 16 {
-            continue;
+            return;
         }
         for i in lo..hi.min(data.len()).saturating_sub(15) {
             // step 2227: cheap 4-byte prefix check before the full key lookup
@@ -60,7 +97,7 @@ pub(crate) fn family_chains(parts: &[Partition]) -> BTreeMap<u64, (usize, usize)
             let Some(f) = fam_at(i) else { continue };
             done.insert(k);
             for &(q, xi) in owners {
-                if q == pi && xi == 0 {
+                if q == pi && xi == self_xi {
                     continue; // the chain itself
                 }
                 let order = (pi, q, xi);
@@ -71,19 +108,27 @@ pub(crate) fn family_chains(parts: &[Partition]) -> BTreeMap<u64, (usize, usize)
             }
         }
     }
-    best.into_iter().map(|(f, (_, c))| (f, c)).collect()
 }
 
 /// Symbol (tag 2022, chain 0) -> family: 64-bit the first family (in file order) whose i64 id
 /// occurs in the symbol body; 32-bit the earliest i32 family id ≥ 0x10000, else the earliest
 /// (steps 494, 1350, 1953).
 pub(crate) fn symbol_family(parts: &[Partition]) -> HashMap<u64, u64> {
+    let chains: Vec<&rvt_core::Chain> = parts.iter().filter_map(|p| p.chains.first().filter(|c| c.bits.is_some())).collect();
+    symbol_family_in(&chains)
+}
+
+/// Step 2246: symbols of nested families (in family chains, index > 0) -> family, by the same rule.
+pub(crate) fn nested_symbol_family(parts: &[Partition]) -> HashMap<u64, u64> {
+    let chains: Vec<&rvt_core::Chain> = parts.iter().flat_map(|p| p.chains.iter().skip(1).filter(|c| c.bits.is_some())).collect();
+    symbol_family_in(&chains)
+}
+
+fn symbol_family_in(chains: &[&rvt_core::Chain]) -> HashMap<u64, u64> {
     let mut fams: Vec<u64> = Vec::new();
-    for p in parts {
-        if let Some(ch) = p.chains.first().filter(|c| c.bits.is_some()) {
-            let ft = vtag(ch.version, TAG_FAMILY);
-            fams.extend(ch.elements.iter().filter(|e| e.tag.is_some() && e.tag == ft).map(|e| e.id));
-        }
+    for ch in chains {
+        let ft = vtag(ch.version, TAG_FAMILY);
+        fams.extend(ch.elements.iter().filter(|e| e.tag.is_some() && e.tag == ft).map(|e| e.id));
     }
     let fset: HashSet<i64> = fams.iter().map(|&f| f as i64).collect();
     let mut fam_index: HashMap<i64, usize> = HashMap::new();
@@ -91,8 +136,7 @@ pub(crate) fn symbol_family(parts: &[Partition]) -> HashMap<u64, u64> {
         fam_index.entry(f as i64).or_insert(k);
     }
     let mut out = HashMap::new();
-    for p in parts {
-        let Some(ch) = p.chains.first().filter(|c| c.bits.is_some()) else { continue };
+    for ch in chains {
         let st = vtag(ch.version, TAG_SYMBOL);
         let bits32 = ch.bits == Some(32);
         for e in ch.elements.iter().filter(|e| e.tag.is_some() && e.tag == st) {

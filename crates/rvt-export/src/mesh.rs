@@ -1423,7 +1423,60 @@ pub fn scene(doc: &Document) -> Scene {
     let (mut n_family, mut n_box) = (0usize, 0usize);
     let mut box_by_cat: std::collections::BTreeMap<i32, usize> = std::collections::BTreeMap::new();
     // step 2227: family shapes per symbol are computed once (many instances share a type)
+    // Step 2246 (§10): nested families. Instances inside a family document (placed in the host
+    // family's coordinates) add their own family's forms, recursively (depth ≤ 3).
+    let nested_symbol_family = doc.nested_symbol_family();
+    let nested_family_chain = doc.nested_family_chains();
+    let chain_insts: std::collections::HashMap<(String, usize), Vec<Instance>> =
+        doc.family_chain_instances().into_iter().map(|(st, ix, v)| ((st, ix), v)).collect();
+    let chain_of_symbol = |sym: u64| -> Option<(String, usize)> {
+        let f = symbol_family.get(&sym).or_else(|| nested_symbol_family.get(&sym))?;
+        family_chain.get(f).or_else(|| nested_family_chain.get(f)).cloned()
+    };
+    let chain_forms = |key: &(String, usize)| -> Vec<[P3; 3]> {
+        let mut t = Vec::new();
+        if let Some(v) = chain_solids.get(key) {
+            let sol: Vec<&ExtrusionSolid> = v.iter().filter(|s| s.void != Some(true) && s.host_block.is_none()).collect();
+            t.extend(family_triangles(&sol));
+        }
+        if let Some(v) = chain_sweeps.get(key) {
+            for sw in v.iter().filter(|s| s.void != Some(true)) {
+                t.extend(sweep_triangles(sw));
+            }
+        }
+        if let Some((bl, rv)) = chain_blrev.get(key) {
+            for b in bl.iter().filter(|b| b.void != Some(true)) {
+                t.extend(blend_triangles(b));
+            }
+            for r in rv.iter().filter(|r| r.void != Some(true)) {
+                t.extend(revolve_triangles(r));
+            }
+        }
+        t
+    };
+    fn nested_tris(
+        key: &(String, usize),
+        depth: usize,
+        chain_insts: &std::collections::HashMap<(String, usize), Vec<Instance>>,
+        chain_of_symbol: &dyn Fn(u64) -> Option<(String, usize)>,
+        chain_forms: &dyn Fn(&(String, usize)) -> Vec<[P3; 3]>,
+    ) -> Vec<[P3; 3]> {
+        let mut out = Vec::new();
+        if depth > 3 {
+            return out;
+        }
+        for i in chain_insts.get(key).into_iter().flatten() {
+            let (Some(sym), Some(o), Some(m)) = (i.symbol, i.origin, i.rotation) else { continue };
+            let Some(k2) = chain_of_symbol(sym).filter(|k2| k2 != key) else { continue };
+            let mut t = chain_forms(&k2);
+            t.extend(nested_tris(&k2, depth + 1, chain_insts, chain_of_symbol, chain_forms));
+            out.extend(t.into_iter().map(|tr| [place(o, &m, tr[0]), place(o, &m, tr[1]), place(o, &m, tr[2])]));
+        }
+        out
+    }
     let mut shape_cache: std::collections::HashMap<u64, std::rc::Rc<Vec<Vec<[P3; 3]>>>> = std::collections::HashMap::new();
+    let mut plain_count: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+    let linked = doc.sub_component_links();
     let columns: std::collections::HashMap<u64, rvt_model::Column> = doc.columns().into_iter().map(|c| (c.id, c)).collect();
     // step 2230: alternatives per symbol: (shape, local min, local max)
     let mut alt_cache: std::collections::HashMap<u64, std::rc::Rc<Vec<(Vec<[P3; 3]>, P3, P3)>>> = std::collections::HashMap::new();
@@ -1603,8 +1656,20 @@ pub fn scene(doc: &Document) -> Scene {
                     for sw in &swp {
                         all.extend(sweep_triangles(sw));
                     }
+                    // step 2246: nested families; candidates without them first, then with (a nested
+                    // part may be switched off by a visibility parameter): the cover test below picks a
+                    // nested candidate only when it alone matches the stored box
+                    let nested = chain_of_symbol(sym).map(|key| nested_tris(&key, 1, &chain_insts, &chain_of_symbol, &chain_forms)).unwrap_or_default();
+                    let with = |x: &Vec<[P3; 3]>| -> Vec<[P3; 3]> { x.iter().chain(nested.iter()).copied().collect() };
+                    let withs = if nested.is_empty() { vec![] } else { vec![with(&all), with(&no_sweeps), with(&ext_only)] };
                     let mut c: Vec<Vec<[P3; 3]>> = Vec::new();
                     for x in [all, no_sweeps, ext_only] {
+                        if !x.is_empty() && !c.iter().any(|y| y.len() == x.len()) {
+                            c.push(x);
+                        }
+                    }
+                    plain_count.insert(sym, c.len());
+                    for x in withs {
                         if !x.is_empty() && !c.iter().any(|y| y.len() == x.len()) {
                             c.push(x);
                         }
@@ -1673,7 +1738,27 @@ pub fn scene(doc: &Document) -> Scene {
                 })
                 .min_by(|a, b| a.0.total_cmp(&b.0))
                 .map(|(_, t)| t);
-            let candidates: Vec<&Vec<[P3; 3]>> = best_alt.into_iter().chain(candidates.iter()).collect();
+            // step 2246: shared nested components are separate instances: no nested shapes then
+            let take = if linked.contains(&i.id) { plain_count.get(&sym).copied().unwrap_or(usize::MAX) } else { usize::MAX };
+            let mut candidates: Vec<&Vec<[P3; 3]>> = best_alt.into_iter().chain(candidates.iter().take(take)).collect();
+
+            // step 2246: the first candidate that covers the stored box (±0.15 ft) goes first
+            if let Some(k) = candidates.iter().position(|loc| {
+                let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+                for t in loc.iter() {
+                    for q in t {
+                        let w = place(o, &m, *q);
+                        for j in 0..3 {
+                            lo[j] = lo[j].min(w[j]);
+                            hi[j] = hi[j].max(w[j]);
+                        }
+                    }
+                }
+                !loc.is_empty() && (0..3).all(|j| (lo[j] - bb[j]).abs() < 0.15 && (hi[j] - bb[j + 3]).abs() < 0.15)
+            }) {
+                let c = candidates.remove(k);
+                candidates.insert(0, c);
+            }
             if !candidates.is_empty() {
                 for local in candidates.iter() {
                 if std::env::var("RVT_MESH_DEBUG").ok().and_then(|v| v.parse::<u64>().ok()) == Some(i.id) {
