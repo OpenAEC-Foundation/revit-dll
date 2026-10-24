@@ -1227,6 +1227,67 @@ pub fn scene(doc: &Document) -> Scene {
         let b = batch!("Pads", [0.66, 0.60, 0.52]);
         b.prism(loops, top - th, *top);
     }
+    // Wall foundations (step 2256; class 918, category Structural Foundations): a footing under its
+    // wall. The wall is the one whose line lies in the footing's stored box and whose base meets its
+    // top; the footing runs along that line over the box, as wide as the box across an axis-aligned
+    // wall (else the width of the axis-aligned footings), as thick as the box.
+    {
+        let fnds: Vec<[f64; 6]> = doc
+            .elements_in_category(-2001300)
+            .filter(|e| e.class_tag.is_some() && e.class_tag == doc.class_tag(918))
+            .filter_map(|e| e.bbox)
+            .collect();
+        let mut widths = Vec::new();
+        let mut placed: Vec<(P3, P3, f64, f64, f64, Option<f64>)> = Vec::new(); // a, b, z0, z1, axis-aligned width
+        for bb in &fnds {
+            let inside = |q: P3| q[0] >= bb[0] - 2.0 && q[0] <= bb[3] + 2.0 && q[1] >= bb[1] - 2.0 && q[1] <= bb[4] + 2.0;
+            let Some(w) = walls_all.iter().find(|w| {
+                let zb = doc.level_elevation(w.base_level).map(|z| z + w.base_offset).unwrap_or(w.p0[2]);
+                // the wall line spans the footing box in both directions (an oblique footing's box is
+                // its diagonal; a straight one's width is at most a few feet)
+                let spans = w.p0[0].min(w.p1[0]) <= bb[0] + 4.5 && w.p0[0].max(w.p1[0]) >= bb[3] - 4.5 && w.p0[1].min(w.p1[1]) <= bb[1] + 4.5 && w.p0[1].max(w.p1[1]) >= bb[4] - 4.5;
+                inside(w.p0) && inside(w.p1) && spans && (zb - bb[5]).abs() < 0.6
+            }) else {
+                continue;
+            };
+            let a = [w.p0[0], w.p0[1], 0.0];
+            let Some(d) = unit(sub([w.p1[0], w.p1[1], 0.0], a)) else { continue };
+            let corners = [[bb[0], bb[1]], [bb[3], bb[1]], [bb[0], bb[4]], [bb[3], bb[4]]];
+            let us: Vec<f64> = corners.iter().map(|c| dot(sub([c[0], c[1], 0.0], a), d)).collect();
+            let (u0, u1) = (us.iter().copied().fold(f64::INFINITY, f64::min), us.iter().copied().fold(f64::NEG_INFINITY, f64::max));
+            let width = if d[0].abs() > 0.999 {
+                Some(bb[4] - bb[1])
+            } else if d[1].abs() > 0.999 {
+                Some(bb[3] - bb[0])
+            } else {
+                None
+            };
+            if let Some(wd) = width {
+                widths.push(wd);
+            }
+            // the footing is centred on the wall line; for an oblique wall the box gives the length only
+            let (pa, pb) = (add(a, mul(d, u0)), add(a, mul(d, u1)));
+            let half = width.map(|wd| wd / 2.0);
+            placed.push((pa, pb, bb[2], bb[5], 0.0, half));
+        }
+        widths.sort_by(|x, y| x.total_cmp(y));
+        let typical = widths.get(widths.len() / 2).copied().unwrap_or(2.0);
+        for (pa, pb, z0, z1, _, half) in placed {
+            let half = half.unwrap_or(typical / 2.0);
+            let Some(d) = unit(sub(pb, pa)) else { continue };
+            // an oblique footing's box also covers its width at both ends; trim that
+            let trim = if d[0].abs() > 0.999 || d[1].abs() > 0.999 { 0.0 } else { half * (d[0].abs().min(d[1].abs())) / d[0].abs().max(d[1].abs()) };
+            let (pa, pb) = (add(pa, mul(d, trim)), sub(pb, mul(d, trim)));
+            let n = [-d[1] * half, d[0] * half, 0.0];
+            let at = |q: P3, s: f64, z: f64| [q[0] + n[0] * s, q[1] + n[1] * s, z];
+            let bot = [at(pa, -1.0, z0), at(pb, -1.0, z0), at(pb, 1.0, z0), at(pa, 1.0, z0)];
+            let top = [at(pa, -1.0, z1), at(pb, -1.0, z1), at(pb, 1.0, z1), at(pa, 1.0, z1)];
+            if std::env::var("RVT_MESH_DEBUG_WF").is_ok() {
+                eprintln!("wf {:.2?} -> {:.2?} half {:.2} z {:.2}..{:.2}", pa, pb, half, z0, z1);
+            }
+            batch!("Structural foundations", [0.58, 0.56, 0.54]).hexa(bot, top);
+        }
+    }
     // Stair landings (step 2241): a component stair's landing has no geometry of its own in the
     // file, but its stored box matches Revit's landing (rac_basic 725396); a slab under the box top,
     // at most 1 ft thick (Revit 0.98 ft)
@@ -1766,7 +1827,8 @@ pub fn scene(doc: &Document) -> Scene {
         }
         // A stored box that is large in all three directions (> 3 m) covers more than the family
         // itself (site, massing or nested content); drawing it hides the building.
-        if ext.iter().all(|v| *v * FT > 3.0) {
+        // step 2256: structural foundations (pile caps with piles) may be large in every direction
+        if ext.iter().all(|v| *v * FT > 3.0) && i.cat != -2001300 {
             continue;
         }
         if matches!(i.cat, -2000170 | -2000171) && ext.iter().filter(|v| **v * FT > 3.0).count() >= 2 {

@@ -540,6 +540,11 @@ impl Document {
         self.topography_by_chain().into_iter().flat_map(|(_, _, t)| t).collect()
     }
 
+    /// The class tag of canonical (2026) class `canonical` in this file's version.
+    pub fn class_tag(&self, canonical: u16) -> Option<u16> {
+        vtag(self.info().version, canonical)
+    }
+
     /// Old sketch-based stairs per project chain (step 1455), with the chain's own levels.
     pub fn legacy_stairs_by_chain(&self) -> Vec<(String, usize, Vec<LegacyStair>)> {
         let lz = |ch: &Chain| -> HashMap<i64, f64> { levels::levels(ch, &self.level_types).into_iter().map(|l| (l.id as i64, l.elevation)).collect() };
