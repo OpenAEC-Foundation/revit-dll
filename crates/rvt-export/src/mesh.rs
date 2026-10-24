@@ -693,6 +693,7 @@ fn instance_batch(cat: i32) -> (&'static str, [f32; 3]) {
         -2000080 | -2001100 => ("Furniture and casework", [0.80, 0.62, 0.40]),
         -2000100 | -2001330 => ("Columns", [0.62, 0.62, 0.66]),
         -2001320 => ("Structural framing", [0.55, 0.55, 0.60]),
+        -2001300 => ("Structural foundations", [0.58, 0.56, 0.54]),
         -2001160 => ("Plumbing fixtures", [0.85, 0.88, 0.90]),
         -2001040 | -2001060 => ("Electrical equipment and fixtures", [0.36, 0.42, 0.55]),
         -2001360 => ("Planting", [0.35, 0.55, 0.30]),
@@ -956,7 +957,13 @@ pub fn scene(doc: &Document) -> Scene {
     let slab = slab_into;
     for f in doc.floors() {
         let t = f.thickness.filter(|t| *t > 0.0).unwrap_or(0.5);
-        slab(batch!("Floors", [0.62, 0.60, 0.56]), &f.curves, f.top_z, t, true);
+        // step 2239: a foundation slab is a Floor of category Structural Foundations
+        let b = if doc.element(f.id).map(|e| e.category) == Some(-2001300) {
+            batch!("Structural foundations", [0.58, 0.56, 0.54])
+        } else {
+            batch!("Floors", [0.62, 0.60, 0.56])
+        };
+        slab(b, &f.curves, f.top_z, t, true);
     }
     for f in doc.ceilings() {
         let t = f.thickness.filter(|t| *t > 0.0).unwrap_or(0.08);
