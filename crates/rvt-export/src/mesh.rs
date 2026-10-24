@@ -721,7 +721,9 @@ pub fn scene(doc: &Document) -> Scene {
     let walls_all = {
         // step 2228: one record per id (a wall can appear in two project chains)
         let mut seen = std::collections::HashSet::new();
-        doc.walls().into_iter().filter(|w| seen.insert(w.id)).collect::<Vec<_>>()
+        // step 2238: walls inside an in-place family are not separate walls
+        let inplace = doc.inplace_ids();
+        doc.walls().into_iter().filter(|w| seen.insert(w.id) && !inplace.contains(&w.id)).collect::<Vec<_>>()
     };
     // step 2228: an element can appear in two project chains (Storax: 366 copies in a second chain,
     // mostly without a type); keep one record per id, the one with a type
@@ -810,7 +812,24 @@ pub fn scene(doc: &Document) -> Scene {
         }
         m
     };
+    // RVT_MESH_DEBUG_WALLS=1: surface (m²) drawn per wall, for comparison with Revit
+    let dbg_walls = std::env::var("RVT_MESH_DEBUG_WALLS").is_ok();
+    let wall_area = |b: Option<&Batch>, n0: usize| -> f64 {
+        let Some(b) = b else { return 0.0 };
+        let p = |i: u32| -> P3 {
+            let k = i as usize * 3;
+            [b.positions[k] as f64, b.positions[k + 1] as f64, b.positions[k + 2] as f64]
+        };
+        b.indices[n0..].chunks_exact(3).map(|t| norm(cross(sub(p(t[1]), p(t[0])), sub(p(t[2]), p(t[0])))) / 2.0).sum()
+    };
+    let mut prev_wall: Option<(u64, usize)> = None;
     for w in walls_all.iter().cloned() {
+        if dbg_walls {
+            if let Some((id, n0)) = prev_wall.take() {
+                eprintln!("wall {id} {:.2}", wall_area(batches.get("Walls"), n0));
+            }
+            prev_wall = Some((w.id, batches.get("Walls").map_or(0, |b| b.indices.len())));
+        }
         // A wall without a compound type (curtain wall, storefront) is drawn by its panels and
         // mullions when it has any; drawing it solid hides them (step 2215).
         if doc.type_thickness(w.wall_type).is_none() && !curtain_boxes.is_empty() {
@@ -931,6 +950,9 @@ pub fn scene(doc: &Document) -> Scene {
         }
     }
 
+    if let Some((id, n0)) = prev_wall.take() {
+        eprintln!("wall {id} {:.2}", wall_area(batches.get("Walls"), n0));
+    }
     let slab = slab_into;
     for f in doc.floors() {
         let t = f.thickness.filter(|t| *t > 0.0).unwrap_or(0.5);
@@ -1007,7 +1029,8 @@ pub fn scene(doc: &Document) -> Scene {
     // Topography (step 2233): Delaunay triangulation of the terrain points in plan, like Revit
     // regenerates the surface from its points.
     // step 2233: hidden group type definition copies (rac_basic: a second terrain over the same area)
-    let hidden = doc.group_definition_ids();
+    let inplace = doc.inplace_ids();
+    let hidden: std::collections::HashSet<u64> = doc.group_definition_ids().union(&inplace).copied().collect();
     // Building pads (step 2234): a slab of the type thickness under level + offset; the terrain it
     // cuts gets its outline (points every ≤ 1 ft, z from the terrain) and loses the triangles inside;
     // vertical pit walls run from the slab bottom up to the terrain. The pad's own cut surface is

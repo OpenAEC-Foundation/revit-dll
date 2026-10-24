@@ -577,3 +577,10 @@ pub struct WallAttachment {
     pub target: i64,
     pub flag: u32,
 }
+
+/// Element that belongs to the content of an in-place family (step 2238).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct InplaceMember {
+    pub id: u64,
+    pub family: i64,
+}

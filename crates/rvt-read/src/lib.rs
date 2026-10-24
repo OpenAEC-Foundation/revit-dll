@@ -428,9 +428,29 @@ impl Document {
             .collect()
     }
 
+    /// In-place family content per chain (step 2238), over every readable chain.
+    pub fn inplace_members_by_chain(&self) -> Vec<(String, usize, Vec<rvt_model::InplaceMember>)> {
+        self.partitions
+            .iter()
+            .flat_map(|p| p.chains.iter().filter(|c| c.bits.is_some()).map(move |ch| (p.stream.clone(), ch.index, groups::inplace_members(ch))))
+            .filter(|(_, _, v)| !v.is_empty())
+            .collect()
+    }
+
     /// Ids of hidden group type definition copies (not drawn).
     pub fn group_definition_ids(&self) -> HashSet<u64> {
         self.group_definition_members_by_chain().into_iter().flat_map(|(_, _, v)| v.into_iter().map(|m| m.id)).collect()
+    }
+
+    /// Ids of in-place family content in project chains (step 2238): drawn through the family
+    /// instance if at all, never as separate walls, floors or instances.
+    pub fn inplace_ids(&self) -> HashSet<u64> {
+        let project: HashSet<(String, usize)> = self.project_chains().map(|(p, ch)| (p.stream.clone(), ch.index)).collect();
+        self.inplace_members_by_chain()
+            .into_iter()
+            .filter(|(s, i, _)| project.contains(&(s.clone(), *i)))
+            .flat_map(|(_, _, v)| v.into_iter().map(|m| m.id))
+            .collect()
     }
 
     /// Building pads per project chain (step 1672).
