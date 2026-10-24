@@ -803,7 +803,7 @@ pub fn scene(doc: &Document) -> Scene {
         .map(|w| (w.id as i64, (w.p0, w.p1, doc.type_thickness(w.wall_type).filter(|t| *t > 0.0).unwrap_or(0.5))))
         .collect();
     let host_of: std::collections::HashMap<u64, i64> = doc.hosted().into_iter().filter_map(|h| h.host.map(|x| (h.id, x))).collect();
-    for i in insts.iter().filter(|i| i.scale.is_none() && i.origin.is_some()) {
+    'inst: for i in insts.iter().filter(|i| i.scale.is_none() && i.origin.is_some()) {
         let Some(e) = doc.element(i.id) else { continue };
         if e.view.is_some_and(|v| v != -1) {
             continue; // view-specific (annotation)
@@ -826,10 +826,20 @@ pub fn scene(doc: &Document) -> Scene {
             let sol = solids_of(sym);
             let swp = sweeps_of(sym);
             if !sol.is_empty() || !swp.is_empty() {
-                let mut local = family_triangles(&sol);
+                // step 2224: extrusions plus sweeps first; when a sweep spoils the fit, extrusions alone
+                let ext_only = family_triangles(&sol);
+                let mut with_sweeps = ext_only.clone();
                 for sw in &swp {
-                    local.extend(sweep_triangles(sw));
+                    with_sweeps.extend(sweep_triangles(sw));
                 }
+                let candidates = if swp.is_empty() {
+                    vec![ext_only]
+                } else if sol.is_empty() {
+                    vec![with_sweeps]
+                } else {
+                    vec![with_sweeps, ext_only]
+                };
+                for local in candidates {
                 if std::env::var("RVT_MESH_DEBUG").ok().and_then(|v| v.parse::<u64>().ok()) == Some(i.id) {
                     eprintln!("debug {}: {} solids, {} local triangles, bbox {:?}", i.id, sol.len(), local.len(), bb);
                 }
@@ -902,7 +912,8 @@ pub fn scene(doc: &Document) -> Scene {
                         b.tri(t[0], t[1], t[2]);
                     }
                     n_family += 1;
-                    continue;
+                    continue 'inst;
+                }
                 }
             }
         }
