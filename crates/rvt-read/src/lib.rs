@@ -492,6 +492,21 @@ impl Document {
         self.hosted_by_chain().into_iter().flat_map(|(_, _, h)| h).collect()
     }
 
+    /// Sweeps of every family (non-project) chain (§8.12; reference `sweeps`).
+    pub fn family_sweeps_by_chain(&self) -> Vec<(String, usize, Vec<rvt_model::SweepSolid>)> {
+        let proj: HashSet<(usize, usize)> = self.project.iter().chain(self.document.iter()).copied().collect();
+        let mut out = Vec::new();
+        for (pi, p) in self.partitions.iter().enumerate() {
+            for (ci, ch) in p.chains.iter().enumerate() {
+                if ch.bits.is_none() || proj.contains(&(pi, ci)) {
+                    continue;
+                }
+                out.push((p.stream.clone(), ch.index, solids::sweep_solids(ch)));
+            }
+        }
+        out
+    }
+
     pub fn stairs(&self) -> Vec<Stair> {
         self.stairs_by_chain().into_iter().flat_map(|(_, _, s)| s).collect()
     }

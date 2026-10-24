@@ -210,3 +210,60 @@ pub(crate) fn extrusion_solids(ch: &Chain) -> Vec<ExtrusionSolid> {
     }
     out
 }
+
+const TAG_SWEEP: u16 = 4226;
+
+/// §8.12 (steps 496–497, 529, 2165): sweeps of one chain whose profile and path are sketches.
+/// Profile = curves of the profile sketch (in 3D, already placed on the path), path = curves of the
+/// path sketch, (X, Y, N) = path sketch plane. Pick-path sweeps (path = −1, step 565) and profile
+/// families (profile = −1, step 1012) are not ported yet.
+pub(crate) fn sweep_solids(ch: &Chain) -> Vec<rvt_model::SweepSolid> {
+    let Some(t) = mapped_tag(ch.version, TAG_SWEEP) else { return vec![] };
+    let bits32 = ch.bits == Some(32);
+    if !bits32 && ch.bits != Some(64) {
+        return vec![];
+    }
+    let ct = vtag(ch.version, TAG_CURVE);
+    let cur: HashSet<u64> = ch.elements.iter().filter(|e| e.tag.is_some() && e.tag == ct).map(|e| e.id).collect();
+    let byid: HashMap<u64, &Element> = ch.elements.iter().map(|e| (e.id, e)).collect();
+    let cv = |sid: u64| -> Vec<Curve> {
+        let Some(e) = byid.get(&sid) else { return vec![] };
+        let (lo, n) = e.body;
+        let cs = curves_in(bits32, &ch.data, &cur, lo, lo + n);
+        if cs.is_empty() && !bits32 {
+            own_body_curves(ch, &byid, e, &cur)
+        } else {
+            cs
+        }
+    };
+    let mut out = Vec::new();
+    for e in ch.elements.iter().filter(|e| e.tag == Some(t)) {
+        let bd = ch.body(e);
+        let l = bd.len();
+        let (void, sketches) = if bits32 {
+            ((l > 108).then(|| bd[105] == 1), (l >= 163).then(|| (i32_at(bd, 130) as i64 as u64, i32_at(bd, 159) as i64 as u64)))
+        } else {
+            ((l > 152).then(|| bd[149] == 1), (l >= 231).then(|| (u64_at(bd, 174), u64_at(bd, 223))))
+        };
+        let Some((ps, pa)) = sketches else { continue };
+        let (prof, path) = (cv(ps), cv(pa));
+        if prof.is_empty() || path.is_empty() {
+            continue;
+        }
+        let pts: Vec<[f64; 3]> = path
+            .iter()
+            .flat_map(|c| match (c.p0, c.p1, c.center) {
+                (Some(a), Some(b), _) => vec![a, b],
+                (_, _, Some(cc)) => vec![cc],
+                _ => vec![],
+            })
+            .collect();
+        let fr = byid.get(&pa).and_then(|sk| sketch_frame(ch.body(sk), &pts));
+        let (x, y, n) = match fr {
+            Some([_, x, y, n]) => (x, y, n),
+            None => ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]),
+        };
+        out.push(rvt_model::SweepSolid { id: e.id, void, profile: prof, path, x, y, n });
+    }
+    out
+}

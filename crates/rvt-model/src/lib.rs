@@ -450,3 +450,19 @@ pub struct Hosted {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub work_plane: Option<i64>,
 }
+
+/// Sweep of a family document (§8.12): profile curves (placed in 3D on the path) swept along the
+/// path curves; (X, Y, N) is the path sketch plane.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct SweepSolid {
+    pub id: u64,
+    pub void: Option<bool>,
+    pub profile: Vec<Curve>,
+    pub path: Vec<Curve>,
+    #[serde(rename = "X")]
+    pub x: [f64; 3],
+    #[serde(rename = "Y")]
+    pub y: [f64; 3],
+    #[serde(rename = "N")]
+    pub n: [f64; 3],
+}

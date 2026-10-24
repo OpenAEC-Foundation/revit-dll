@@ -115,6 +115,12 @@ fn run(args: &[String]) -> Result<Value, String> {
                 doc.stairs_by_chain().into_iter().map(|(s, i, v)| json!({"stream": s, "index": i, "stairs": v})).collect();
             Ok(json!({"chains": chains}))
         }
+        "sweeps" => {
+            let doc = rvt_read::Document::open(path).map_err(err)?;
+            let chains: Vec<Value> =
+                doc.family_sweeps_by_chain().into_iter().map(|(s, i, v)| json!({"stream": s, "index": i, "sweeps": v})).collect();
+            Ok(json!({"chains": chains}))
+        }
         "hosted" => {
             let doc = rvt_read::Document::open(path).map_err(err)?;
             let chains: Vec<Value> =
