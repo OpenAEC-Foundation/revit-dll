@@ -95,7 +95,17 @@ fn value_set(b: &[u8], o: usize, valid: &dyn Fn(i64) -> bool, w32: bool) -> Opti
     if !printable(&name) || p + 4 > b.len() {
         return None;
     }
-    let cnt = u32_at(b, p) as usize;
+    let mut p = p;
+    let mut cnt = u32_at(b, p) as usize;
+    // step 2265: a block between name and count, `00 | u32 n | n × (u32, u16)` (snowdon arch 2025
+    // elevator door 721738: n = 4, then 9 rows 'Door Clearance/Height/Width', trim sizes)
+    if !(1..=400).contains(&cnt) && p + 5 <= b.len() && b[p] == 0 {
+        let n = u32_at(b, p + 1) as usize;
+        if (1..=64).contains(&n) && p + 9 + 6 * n <= b.len() {
+            p += 5 + 6 * n;
+            cnt = u32_at(b, p) as usize;
+        }
+    }
     if !(1..=400).contains(&cnt) {
         return None;
     }
@@ -145,7 +155,10 @@ pub(crate) fn value_sets(ch: &Chain, params: &HashSet<u64>, tags: &[u16]) -> Vec
         while o + 16 < l {
             let n0 = u32_at(bd, o) as usize;
             let p0 = o + 4 + 2 * n0;
-            let s = if n0 <= 80 && p0 + 8 <= l && (1..=400).contains(&(u32_at(bd, p0) as usize)) && u32_at(bd, p0 + 4) <= 300 {
+            let s = if n0 <= 80
+                && p0 + 8 <= l
+                && ((1..=400).contains(&(u32_at(bd, p0) as usize)) && u32_at(bd, p0 + 4) <= 300 || bd[p0] == 0 && (1..=64).contains(&u32_at(bd, p0 + 1)))
+            {
                 value_set(bd, o, &valid, w32)
             } else {
                 None
