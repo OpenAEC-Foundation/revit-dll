@@ -1831,12 +1831,13 @@ pub fn scene(doc: &Document) -> Scene {
     // shape lies in the stored box (±0.15 ft; rme face-based air terminals: no 'Height' along z).
     let global_names = doc.parameter_names_global();
     let typed: std::cell::RefCell<std::collections::HashMap<u64, [f64; 3]>> = Default::default();
+    let current_cache: std::cell::RefCell<std::collections::HashMap<(String, usize), Option<rvt_model::ValueSet>>> = Default::default();
     let sizes = |set: &rvt_model::ValueSet, names: &std::collections::HashMap<u64, Option<String>>| -> [Option<f64>; 3] {
         let named = |p: i64, want: &[&str]| p > 0 && names.get(&(p as u64)).cloned().flatten().is_some_and(|n| want.contains(&n.as_str()));
         let pick = |bi: i64, want: &[&str]| {
             set.rows.iter().find(|r| r.param == bi).or_else(|| set.rows.iter().find(|r| named(r.param, want))).map(|r| r.num).filter(|v| *v > 1e-6)
         };
-        [pick(-1001301, &["Width", "Length"]), pick(-1010003, &["Depth"]), pick(-1001300, &["Height"])]
+        [pick(-1001301, &["Width", "Length", "Door Width"]), pick(-1010003, &["Depth"]), pick(-1001300, &["Height", "Door Height"])]
     };
     let type_scale = |sym: u64, own: &[[P3; 3]]| -> Option<[f64; 3]> {
         let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
@@ -1859,17 +1860,30 @@ pub fn scene(doc: &Document) -> Scene {
             let mut cache = chain_names.borrow_mut();
             cache.entry(key.clone()).or_insert_with(|| doc.parameter_names_of(&key.0, key.1)).clone()
         };
-        let mut cache = chain_sets.borrow_mut();
-        let sets = cache.entry(key.clone()).or_insert_with(|| doc.value_sets_of(&key.0, key.1));
-        let close = |a: f64, b: f64| (a - b).abs() <= 0.05 * a.max(b);
-        // the family type the forms are drawn at: every known size matches, the most sizes first
-        let default = sets
-            .iter()
-            .map(|set| sizes(set, &fnames))
-            .filter(|d| (0..3).all(|k| d[k].is_none_or(|v| close(v, ext[k]))))
-            .max_by_key(|d| d.iter().filter(|v| v.is_some()).count())?;
+        // the family type the forms are drawn at: the type whose known sizes all match the forms
+        // (most sizes first); step 2266: else the family document's current values (elevator door:
+        // 'Door Width' 3.0 + frame = 4.08 ft forms, matching no type)
+        let matched = {
+            let mut cache = chain_sets.borrow_mut();
+            let sets = cache.entry(key.clone()).or_insert_with(|| doc.value_sets_of(&key.0, key.1));
+            let close = |a: f64, b: f64| (a - b).abs() <= 0.05 * a.max(b);
+            sets.iter()
+                .map(|set| sizes(set, &fnames))
+                .filter(|d| d.iter().any(|v| v.is_some()) && (0..3).all(|k| d[k].is_none_or(|v| close(v, ext[k]))))
+                .max_by_key(|d| d.iter().filter(|v| v.is_some()).count())
+        };
+        let default = match matched {
+            Some(d) => d,
+            None => {
+                let current = current_cache.borrow_mut().entry(key.clone()).or_insert_with(|| doc.family_current_values(&key.0, key.1)).clone();
+                current.map(|c| sizes(&c, &fnames)).filter(|d| d.iter().any(|v| v.is_some()))?
+            }
+        };
+        // additive: a size parameter need not span the whole form (elevator door: Door Width + frame)
         let sc: [f64; 3] = std::array::from_fn(|k| match (target[k], default[k]) {
-            (Some(t), Some(d)) => t / d,
+            // a size counts for the axis only when it spans most of the form there, ≥ 70% (a shower's
+            // pipe 'Length' 0.12 ft and door 1.875 of 2.83 ft are no overall size; elevator door 3.0 of 4.08)
+            (Some(t), Some(d)) if ext[k] > 1e-6 && d >= 0.7 * ext[k] && t >= 0.7 * ext[k] => (ext[k] + t - d) / ext[k],
             _ => 1.0,
         });
         (sc.iter().any(|v| (v - 1.0).abs() > 0.01) && sc.iter().all(|v| (0.2..=5.0).contains(v))).then_some(sc)
@@ -2252,8 +2266,15 @@ pub fn scene(doc: &Document) -> Scene {
                     }
                     (lo, hi)
                 };
-                // step 2264: first the shape at its type size, when that lies in the stored box
-                if let Some(sc) = typed.borrow().get(&sym).copied() {
+                let world: Vec<[P3; 3]> = local.iter().map(|t| [place(o, &m, t[0]), place(o, &m, t[1]), place(o, &m, t[2])]).collect();
+                let (lo, hi) = bounds(&world);
+                let covers = !world.is_empty() && (0..3).all(|k| (lo[k] - bb[k]).abs() < 0.15 && (hi[k] - bb[k + 3]).abs() < 0.15);
+                // step 2264: the shape at its type size, when that lies in the stored box and the unscaled
+                // shape does not already cover it (rme panelboards: 'Height' is not the form height)
+                if std::env::var("RVT_MESH_DEBUG").ok().and_then(|v| v.parse::<u64>().ok()) == Some(i.id) {
+                    eprintln!("debug {}: type scale {:?}, covers {covers}", i.id, typed.borrow().get(&sym));
+                }
+                if let Some(sc) = typed.borrow().get(&sym).copied().filter(|_| !covers) {
                     let ws: Vec<[P3; 3]> = scale3(local, sc).iter().map(|t| [place(o, &m, t[0]), place(o, &m, t[1]), place(o, &m, t[2])]).collect();
                     let (sl, sh) = bounds(&ws);
                     if !ws.is_empty() && (0..3).all(|k| sl[k] >= bb[k] - 0.15 && sh[k] <= bb[k + 3] + 0.15) {
@@ -2270,9 +2291,6 @@ pub fn scene(doc: &Document) -> Scene {
                         continue 'inst;
                     }
                 }
-                let world: Vec<[P3; 3]> = local.iter().map(|t| [place(o, &m, t[0]), place(o, &m, t[1]), place(o, &m, t[2])]).collect();
-                let (lo, hi) = bounds(&world);
-                let covers = !world.is_empty() && (0..3).all(|k| (lo[k] - bb[k]).abs() < 0.15 && (hi[k] - bb[k + 3]).abs() < 0.15);
                 // Step 2217: family geometry is parametric (beam length, type sizes, height
                 // parameters). When the rotation is axis-aligned, fit the family shape per local axis
                 // to the element's stored box instead of falling back to the box.

@@ -96,16 +96,26 @@ fn value_set(b: &[u8], o: usize, valid: &dyn Fn(i64) -> bool, w32: bool) -> Opti
         return None;
     }
     let mut p = p;
-    let mut cnt = u32_at(b, p) as usize;
+    let cnt = u32_at(b, p) as usize;
     // step 2265: a block between name and count, `00 | u32 n | n × (u32, u16)` (snowdon arch 2025
     // elevator door 721738: n = 4, then 9 rows 'Door Clearance/Height/Width', trim sizes)
     if !(1..=400).contains(&cnt) && p + 5 <= b.len() && b[p] == 0 {
         let n = u32_at(b, p + 1) as usize;
         if (1..=64).contains(&n) && p + 9 + 6 * n <= b.len() {
             p += 5 + 6 * n;
-            cnt = u32_at(b, p) as usize;
         }
     }
+    let (rows, q) = value_rows(b, p, valid, w32)?;
+    Some((name, rows, q))
+}
+
+/// `u32 n | n × (str text | u32 X [+2 B when 0xFFFFFFFF] | f64 | i64 element | i64 param | 6 B)`
+/// (32-bit: i32 element and parameter); the rows of a value set.
+fn value_rows(b: &[u8], p: usize, valid: &dyn Fn(i64) -> bool, w32: bool) -> Option<(Vec<ValueRow>, usize)> {
+    if p + 4 > b.len() {
+        return None;
+    }
+    let cnt = u32_at(b, p) as usize;
     if !(1..=400).contains(&cnt) {
         return None;
     }
@@ -138,7 +148,31 @@ fn value_set(b: &[u8], o: usize, valid: &dyn Fn(i64) -> bool, w32: bool) -> Opti
         }
         rows.push(ValueRow { param: pid, num: v, elem: el, text: txt });
     }
-    Some((name, rows, q))
+    Some((rows, q))
+}
+
+/// Step 2266: the current values of a family document: in its Family (1967) record, before the
+/// named type sets, an unnamed row block after `ff ff ff ff | u16` (snowdon arch 2025 casework
+/// family: Width 3.0 = type 36", the drawn forms; elevator door: Door Width 3.0, Door Clearance
+/// 6.0 = type 36" x 84"). First block with at least two rows; type name ''.
+pub(crate) fn current_values(ch: &Chain, params: &HashSet<u64>) -> Vec<ValueSet> {
+    let valid = |p: i64| (p > 0 && params.contains(&(p as u64))) || (-3_000_000 < p && p < -1_000_000);
+    let ft = vtag(ch.version, TAG_FAMILY);
+    let w32 = ch.bits == Some(32);
+    let mut out = Vec::new();
+    for e in ch.elements.iter().filter(|e| e.tag.is_some() && e.tag == ft) {
+        let bd = ch.body(e);
+        let hit = (0..bd.len().saturating_sub(10)).find_map(|o| {
+            if bd[o..o + 4] != [0xff; 4] {
+                return None;
+            }
+            value_rows(bd, o + 6, &valid, w32).filter(|(r, _)| r.len() >= 2)
+        });
+        if let Some((rows, _)) = hit {
+            out.push(ValueSet { owner: e.id, type_name: String::new(), rows });
+        }
+    }
+    out
 }
 
 /// Value sets in the bodies of elements with the given (canonical) tags; type name '' = the

@@ -597,6 +597,20 @@ impl Document {
             .unwrap_or_default()
     }
 
+    /// Step 2266: current values of a family chain (the type its forms are drawn at), if found.
+    pub fn family_current_values(&self, stream: &str, index: usize) -> Option<rvt_model::ValueSet> {
+        self.partitions
+            .iter()
+            .filter(|p| p.stream == stream)
+            .flat_map(|p| p.chains.iter().filter(|c| c.index == index && c.bits.is_some()))
+            .map(|ch| {
+                let prm: HashSet<u64> = params::parameter_names(ch).into_keys().collect();
+                params::current_values(ch, &prm)
+            })
+            .next()
+            .and_then(|v| v.into_iter().next())
+    }
+
     /// Value sets (§9.2) of the Family and FamilySymbol records of one chain (for a family chain:
     /// its own defaults and its nested types).
     pub fn value_sets_of(&self, stream: &str, index: usize) -> Vec<rvt_model::ValueSet> {
