@@ -1032,10 +1032,11 @@ pub fn scene(doc: &Document) -> Scene {
                         }
                         let (slo, shi) = bounds(&local);
                         // step 2218: the stored box of a door also covers its swing (8 ft deep for a
-                        // 0.14 ft leaf); only moderate stretches (0.5–2 per axis) are plausible
+                        // 0.14 ft leaf); stretching up to 2× is plausible. Shrinking is safe down to 0.05×:
+                        // a smaller box cannot contain a swing (step 2229: Storax louvres 0.295 → 0.067 ft)
                         let plausible = (0..3).all(|k| {
                             let (se, ee) = (shi[k] - slo[k], ehi[k] - elo[k]);
-                            se < 1e-6 || (ee / se >= 0.5 && ee / se <= 2.0)
+                            se < 1e-6 || (ee / se >= 0.05 && ee / se <= 2.0)
                         });
                         if !plausible {
                             return None;
@@ -1071,6 +1072,24 @@ pub fn scene(doc: &Document) -> Scene {
         }
         n_box += 1;
         *box_by_cat.entry(i.cat).or_default() += 1;
+        // RVT_MESH_DEBUG_BOX=<category>: why an instance of that category stays a box
+        if std::env::var("RVT_MESH_DEBUG_BOX").ok().and_then(|v| v.parse::<i32>().ok()) == Some(i.cat) && box_by_cat[&i.cat] <= 6 {
+            let c = i.symbol.and_then(|s| shape_cache.get(&s)).map(|c| c.len()).unwrap_or(0);
+            let ext = |t: &[[P3; 3]]| {
+                let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+                for tr in t {
+                    for p in tr {
+                        for k in 0..3 {
+                            lo[k] = lo[k].min(p[k]);
+                            hi[k] = hi[k].max(p[k]);
+                        }
+                    }
+                }
+                [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]]
+            };
+            let local = i.symbol.and_then(|s| shape_cache.get(&s)).and_then(|c| c.first().map(|t| ext(t)));
+            eprintln!("box {} sym {:?} candidates {} local ext {:?} element ext {:?} M {:?}", i.id, i.symbol, c, local, [bb[3] - bb[0], bb[4] - bb[1], bb[5] - bb[2]], i.rotation.map(|m| m.map(|v| (v * 100.0).round() / 100.0)));
+        }
         if matches!(i.cat, -2000023 | -2000014) {
             if let Some(&(p0, p1, t)) = host_of.get(&i.id).and_then(|h| wall_band.get(h)) {
                 if let Some(d) = unit(sub([p1[0], p1[1], 0.0], [p0[0], p0[1], 0.0])) {
