@@ -1525,6 +1525,59 @@ pub fn scene(doc: &Document) -> Scene {
                 }
             }
         }
+        // Step 2244: RPC entourage (people, cars; no solids) as Revit shows it: crossed vertical
+        // silhouettes for people; a long one is a car, drawn as a low-poly body and cabin (Revit shows
+        // a car mesh). Local half sizes from the stored box through the rotation.
+        if i.cat == -2001370 {
+            if let (Some(sym), Some(o), Some(m)) = (i.symbol, i.origin, i.rotation) {
+                if solids_of(sym).is_empty() && sweeps_of(sym).is_empty() && blrev_of(sym).is_empty() {
+                    let (c, s) = (m[0].abs(), m[3].abs());
+                    let det = c * c - s * s;
+                    let (hx, hy) = if det.abs() > 0.2 {
+                        (((c * ext[0] - s * ext[1]) / det / 2.0).abs(), ((c * ext[1] - s * ext[0]) / det / 2.0).abs())
+                    } else {
+                        let h = ext[0].max(ext[1]) / (c + s).max(1.0) / 2.0;
+                        (h, h)
+                    };
+                    let car = hx.max(hy) > 1.8 * hx.min(hy);
+                    const PERSON: [(f64, f64); 12] = [
+                        (-0.25, 0.0), (0.25, 0.0), (0.3, 0.5), (0.45, 0.55), (0.4, 0.8), (0.15, 0.85),
+                        (0.15, 1.0), (-0.15, 1.0), (-0.15, 0.85), (-0.4, 0.8), (-0.45, 0.55), (-0.3, 0.5),
+                    ];
+                    let h = ext[2];
+                    let z0 = bb[2] - o[2];
+                    let b = batch!("Entourage", [0.42, 0.45, 0.55]);
+                    if car {
+                        // a low-poly car: body over the full footprint, a narrower cabin on top
+                        let lb = |x0: f64, x1: f64, y0: f64, y1: f64, v0: f64, v1: f64| {
+                            let c4 = |v: f64| [[x0, y0], [x1, y0], [x1, y1], [x0, y1]].map(|q| place(o, &m, [q[0], q[1], z0 + v * h]));
+                            (c4(v0), c4(v1))
+                        };
+                        let (lx, ly) = (hx, hy);
+                        let (bot, top) = lb(-lx, lx, -ly, ly, 0.15, 0.5);
+                        b.hexa(bot, top);
+                        let (cx0, cx1, cy0, cy1) = if hx >= hy { (-0.45 * lx, 0.3 * lx, -0.85 * ly, 0.85 * ly) } else { (-0.85 * lx, 0.85 * lx, -0.45 * ly, 0.3 * ly) };
+                        let (bot, top) = lb(cx0, cx1, cy0, cy1, 0.5, 0.9);
+                        b.hexa(bot, top);
+                        n_family += 1;
+                        continue;
+                    }
+                    for (axis, half) in [([1.0, 0.0], hx), ([0.0, 1.0], hy)] {
+                        let outline: &[(f64, f64)] = &PERSON;
+                        let pt = |u: f64, v: f64| place(o, &m, [axis[0] * u * half, axis[1] * u * half, z0 + v * h]);
+                        let pts: Vec<P3> = outline.iter().map(|&(u, v)| pt(u, v)).collect();
+                        let cen = pt(0.0, 0.5);
+                        for k in 0..pts.len() {
+                            let (p, q) = (pts[k], pts[(k + 1) % pts.len()]);
+                            b.tri(cen, p, q);
+                            b.tri(cen, q, p);
+                        }
+                    }
+                    n_family += 1;
+                    continue;
+                }
+            }
+        }
         // A stored box that is large in all three directions (> 3 m) covers more than the family
         // itself (site, massing or nested content); drawing it hides the building.
         if ext.iter().all(|v| *v * FT > 3.0) {
