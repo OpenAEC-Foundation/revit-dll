@@ -100,11 +100,28 @@ fn instance(ch: &Chain, e: &Element, lk: &Lookups) -> Instance {
     let mut rotation = None;
     let mut origin = None;
     let mut scale = None;
+    let (mut hand_flipped, mut facing_flipped) = (false, false);
     for o in 0..l.saturating_sub(96) {
         let v = d9(bd, o);
         if is_ortho(&v) {
             rotation = Some(v);
             origin = Some(d3(bd, o + 72));
+            // step 2257: flip flags, `ff×4 | 00×12 | 01 | hand | facing`, 63–108 B before the matrix
+            // (rme/rac_basic 2026 doors, windows, furniture: 204/212 = Revit; rme 2026 all instances
+            // 4419/4427 apart from curtain panels and mullions, whose records differ; 2021–2025 the
+            // same; 2020: 00×8; older versions not verified)
+            let ver = ch.version.unwrap_or(0);
+            let zeros = if ver >= 2021 { 12 } else { 8 };
+            if ver >= 2020 && !matches!(e.cat, -2000170 | -2000171) {
+                let mut pat = vec![0xffu8; 4];
+                pat.extend(std::iter::repeat(0).take(zeros));
+                pat.push(1);
+                let n = pat.len();
+                if let Some(k) = (o.saturating_sub(128)..o.saturating_sub(n + 1)).rev().find(|&k| bd[k..k + n] == pat[..]) {
+                    hand_flipped = bd[k + n] == 1;
+                    facing_flipped = bd[k + n + 1] == 1;
+                }
+            }
             break;
         }
     }
@@ -240,6 +257,8 @@ fn instance(ch: &Chain, e: &Element, lk: &Lookups) -> Instance {
         reference_level_source,
         work_plane_host: None,
         system: None,
+        hand_flipped,
+        facing_flipped,
     }
 }
 

@@ -344,6 +344,24 @@ fn dot(a: P3, b: P3) -> f64 {
 }
 
 /// Instance placement (step 2214): world[r] = o[r] + Σk m[3r+k]·p[k].
+/// Step 2257: placement of a flipped instance. The stored matrix is a rotation; a hand or facing
+/// flip (not both: that is a half turn, already in the stored rotation) mirrors the family's local
+/// Y axis (rme/rac_basic 2026 doors: the leaf on Revit's side for 124/124).
+fn flipped_rotation(i: &Instance) -> Option<[f64; 9]> {
+    let mut m = i.rotation?;
+    if i.hand_flipped != i.facing_flipped {
+        for k in [1, 4, 7] {
+            m[k] = -m[k];
+        }
+    }
+    Some(m)
+}
+
+/// Determinant of a 3×3 (row-major): negative for a mirrored placement.
+fn det3(m: &[f64; 9]) -> f64 {
+    m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6]) + m[2] * (m[3] * m[7] - m[4] * m[6])
+}
+
 fn place(o: P3, m: &[f64; 9], p: P3) -> P3 {
     [
         o[0] + m[0] * p[0] + m[1] * p[1] + m[2] * p[2],
@@ -773,6 +791,9 @@ pub fn scene(doc: &Document) -> Scene {
                     by_id.push(i);
                 }
             }
+        }
+        for i in by_id.iter_mut() {
+            i.rotation = flipped_rotation(i);
         }
         by_id
     };
@@ -1554,7 +1575,15 @@ pub fn scene(doc: &Document) -> Scene {
     let nested_symbol_family = doc.nested_symbol_family();
     let nested_family_chain = doc.nested_family_chains();
     let chain_insts: std::collections::HashMap<(String, usize), Vec<Instance>> =
-        doc.family_chain_instances().into_iter().map(|(st, ix, v)| ((st, ix), v)).collect();
+        doc.family_chain_instances()
+            .into_iter()
+            .map(|(st, ix, mut v)| {
+                for i in v.iter_mut() {
+                    i.rotation = flipped_rotation(i);
+                }
+                ((st, ix), v)
+            })
+            .collect();
     let chain_of_symbol = |sym: u64| -> Option<(String, usize)> {
         let f = symbol_family.get(&sym).or_else(|| nested_symbol_family.get(&sym))?;
         family_chain.get(f).or_else(|| nested_family_chain.get(f)).cloned()
@@ -1596,7 +1625,12 @@ pub fn scene(doc: &Document) -> Scene {
             let Some(k2) = chain_of_symbol(sym).filter(|k2| k2 != key) else { continue };
             let mut t = chain_forms(&k2);
             t.extend(nested_tris(&k2, depth + 1, chain_insts, chain_of_symbol, chain_forms));
-            out.extend(t.into_iter().map(|tr| [place(o, &m, tr[0]), place(o, &m, tr[1]), place(o, &m, tr[2])]));
+            // a mirrored placement keeps the faces outward by reversing the winding
+            let rev = det3(&m) < 0.0;
+            out.extend(t.into_iter().map(|tr| {
+                let (a, b) = if rev { (tr[2], tr[0]) } else { (tr[0], tr[2]) };
+                [place(o, &m, a), place(o, &m, tr[1]), place(o, &m, b)]
+            }));
         }
         out
     }
@@ -1676,6 +1710,19 @@ pub fn scene(doc: &Document) -> Scene {
         .map(|w| (w.id as i64, (w.p0, w.p1, doc.type_thickness(w.wall_type).filter(|t| *t > 0.0).unwrap_or(0.5))))
         .collect();
     let host_of: std::collections::HashMap<u64, i64> = doc.hosted().into_iter().filter_map(|h| h.host.map(|x| (h.id, x))).collect();
+    // Step 2257: a door or window family keeps its template's host wall (rme: 300 mm); its frame is
+    // drawn against that wall's faces. Per family chain: the wall's normal (plan), centre offset and
+    // width, when the family has exactly one host wall.
+    let fam_host: std::collections::HashMap<(String, usize), (P3, f64, f64)> = doc
+        .family_host_walls()
+        .into_iter()
+        .filter_map(|(k, v)| {
+            let [(w, Some(t))] = v.as_slice() else { return None };
+            let d = unit(sub([w.p1[0], w.p1[1], 0.0], [w.p0[0], w.p0[1], 0.0]))?;
+            let n = [-d[1], d[0], 0.0];
+            (*t > 1e-3 && w.curve.is_none()).then(|| (k, (n, dot([w.p0[0], w.p0[1], 0.0], n), *t)))
+        })
+        .collect();
     // RVT_MESH_DEBUG_INST=1: surface (m²) drawn per instance and batch, for comparison with Revit
     let dbg_inst = std::env::var("RVT_MESH_DEBUG_INST").is_ok();
     let mut prev_inst: Option<(u64, i32, Vec<(&'static str, usize)>)> = None;
@@ -1962,6 +2009,42 @@ pub fn scene(doc: &Document) -> Scene {
                 let c = candidates.remove(k);
                 candidates.insert(0, c);
             }
+            // step 2257: an opening's depth follows its host wall: the family wall's faces move onto
+            // the project wall's faces, what lies beyond a face (casing, handles) moves with it, and
+            // what lies between scales with the thickness
+            let depth_map: Option<(P3, [f64; 4])> = (matches!(i.cat, -2000023 | -2000014))
+                .then(|| {
+                    let (fnrm, fc, ft) = *symbol_family.get(&sym).and_then(|f| family_chain.get(f)).and_then(|k| fam_host.get(k))?;
+                    let &(wp0, wp1, wt) = host_of.get(&i.id).and_then(|h| wall_band.get(h))?;
+                    let wd = unit(sub([wp1[0], wp1[1], 0.0], [wp0[0], wp0[1], 0.0]))?;
+                    let wn = [-wd[1], wd[0], 0.0];
+                    let dir = sub(place(o, &m, fnrm), o);
+                    if dot(dir, wn).abs() < 0.99 {
+                        return None;
+                    }
+                    // the project wall's centre line in the family's depth coordinate
+                    let wc = dot(sub([wp0[0], wp0[1], 0.0], [o[0], o[1], 0.0]), dir);
+                    Some((fnrm, [fc - ft / 2.0, fc + ft / 2.0, wc - wt / 2.0, wc + wt / 2.0]))
+                })
+                .flatten();
+            let remapped: Vec<Vec<[P3; 3]>> = match depth_map {
+                Some((nrm, [f0, f1, w0, w1])) => {
+                    let mv = |q: P3| -> P3 {
+                        let sd = dot(q, nrm);
+                        let s2 = if sd < f0 {
+                            sd + w0 - f0
+                        } else if sd > f1 {
+                            sd + w1 - f1
+                        } else {
+                            w0 + (sd - f0) * (w1 - w0) / (f1 - f0)
+                        };
+                        add(q, mul(nrm, s2 - sd))
+                    };
+                    candidates.iter().map(|c| c.iter().map(|t| t.map(mv)).collect()).collect()
+                }
+                None => Vec::new(),
+            };
+            let candidates: Vec<&Vec<[P3; 3]>> = if depth_map.is_some() { remapped.iter().collect() } else { candidates };
             if !candidates.is_empty() {
                 for local in candidates.iter() {
                 if std::env::var("RVT_MESH_DEBUG").ok().and_then(|v| v.parse::<u64>().ok()) == Some(i.id) {
@@ -2069,8 +2152,13 @@ pub fn scene(doc: &Document) -> Scene {
                     });
                 if covers || fitted.is_some() {
                     let b = batch!(name, color);
+                    let rev = det3(&m) < 0.0;
                     for t in fitted.unwrap_or(world) {
-                        b.tri(t[0], t[1], t[2]);
+                        if rev {
+                            b.tri(t[2], t[1], t[0]);
+                        } else {
+                            b.tri(t[0], t[1], t[2]);
+                        }
                     }
                     n_family += 1;
                     continue 'inst;

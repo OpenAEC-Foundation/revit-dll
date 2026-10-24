@@ -214,6 +214,13 @@ impl Document {
         Some(self.info_of(pi, ci, &self.partitions[pi].chains[ci].elements[ei]))
     }
 
+    /// Raw record body of an element (for format analysis).
+    pub fn element_body(&self, id: u64) -> Option<Vec<u8>> {
+        let &(pi, ci, ei) = self.index.get(&id)?;
+        let ch = &self.partitions[pi].chains[ci];
+        Some(ch.body(&ch.elements[ei]).to_vec())
+    }
+
     /// Every element of the file (all partitions and chains).
     pub fn elements(&self) -> impl Iterator<Item = ElementInfo> + '_ {
         self.partitions.iter().enumerate().flat_map(move |(pi, p)| {
@@ -248,6 +255,35 @@ impl Document {
     /// Wall instances of all project chains.
     pub fn walls(&self) -> Vec<Wall> {
         self.walls_by_chain().into_iter().flat_map(|(_, _, w)| w).collect()
+    }
+
+    /// Step 2257: the host walls of family documents (a door or window template's wall), per family
+    /// chain, with the width of their compound type in the same chain.
+    pub fn family_host_walls(&self) -> HashMap<(String, usize), Vec<(Wall, Option<f64>)>> {
+        let ctx = walls::WallContext { level_z: &self.level_z, wall_types: &self.wall_types, phases: &self.phases };
+        let proj: HashSet<(usize, usize)> = self.project.iter().chain(self.document.iter()).copied().collect();
+        let mut out = HashMap::new();
+        for (pi, p) in self.partitions.iter().enumerate() {
+            for (ci, ch) in p.chains.iter().enumerate() {
+                if ch.bits.is_none() || proj.contains(&(pi, ci)) {
+                    continue;
+                }
+                let w = walls::walls(ch, &ctx);
+                if w.is_empty() {
+                    continue;
+                }
+                let types = compound::compound_types(ch);
+                let v = w
+                    .into_iter()
+                    .map(|w| {
+                        let t = types.iter().find(|t| t.id as i64 == w.wall_type).map(|t| t.width);
+                        (w, t)
+                    })
+                    .collect();
+                out.insert((p.stream.clone(), ch.index), v);
+            }
+        }
+        out
     }
 
     /// Walls per project chain, keyed by (partition stream, chain index).

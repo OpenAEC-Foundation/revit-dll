@@ -290,6 +290,11 @@ pub struct Instance {
     /// MEP system of duct and pipe terminals/accessories (present, possibly null, for those categories).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system: Option<Option<u64>>,
+    /// Hand and facing flip (step 2257): the two bytes after `ff×4 | 00×12 | 01` before the matrix.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub hand_flipped: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub facing_flipped: bool,
 }
 
 /// Straight MEP curve segment: duct, pipe, cable tray or conduit (§15.1, steps 240, 1132,
