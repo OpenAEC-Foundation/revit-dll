@@ -514,3 +514,16 @@ pub struct RevolveSolid {
     pub start_angle: f64,
     pub end_angle: f64,
 }
+
+/// Old sketch-based stairs (step 1455): levels, legacy StairsType and the sketch lines by kind.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct LegacyStair {
+    pub id: u64,
+    pub base_level: Option<i64>,
+    pub top_level: Option<i64>,
+    #[serde(rename = "type")]
+    pub r#type: Option<i64>,
+    pub base_z: Option<f64>,
+    pub top_z: Option<f64>,
+    pub lines: std::collections::BTreeMap<&'static str, Vec<Curve>>,
+}

@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::f64::consts::PI;
 
 use rvt_core::{vtag, Chain, Element};
-use rvt_model::{Curve, PathSegment, RunGeometry, Stair};
+use rvt_model::{Curve, LegacyStair, PathSegment, RunGeometry, Stair};
 
 use crate::curves::{block, curves_in, is_unit, Block};
 use crate::util::{f64_at, find, i32_at, i64_at};
@@ -334,4 +334,43 @@ pub(crate) fn stairs_runs(ch: &Chain) -> Vec<rvt_model::StairsRun> {
         out.push(rvt_model::StairsRun { id: e.id, stairs: q(bd, s), width: w, base_elevation: b, top_elevation: t });
     }
     out
+}
+
+const TAG_LEGACY_STAIRS: u16 = 3398;
+const TAG_LEGACY_STAIRS_TYPE: u16 = 4000;
+
+/// Step 1455: old sketch-based stairs (2026 tag 3398, 2014 tag 2614; category −2000120). Base and
+/// top level = the first two consecutive level references (@219/@227 in 64-bit), type = a reference
+/// to the legacy StairsType (4000, step 1431), geometry = the sketch lines of its own Sketch.
+/// `level_z` = the chain's own levels (like the reference).
+pub(crate) fn legacy_stairs(ch: &Chain, level_z: &HashMap<i64, f64>) -> Vec<LegacyStair> {
+    let Some(t) = vtag(ch.version, TAG_LEGACY_STAIRS) else { return vec![] };
+    let xs: Vec<&Element> = ch.elements.iter().filter(|e| e.tag == Some(t) && e.cat == -2000120).collect();
+    if xs.is_empty() {
+        return vec![];
+    }
+    let bits32 = ch.bits == Some(32);
+    let w = if bits32 { 4 } else { 8 };
+    let lv: HashSet<i64> = ch.elements.iter().filter(|e| e.cat == CAT_LEVELS).map(|e| e.id as i64).collect();
+    let tt = vtag(ch.version, TAG_LEGACY_STAIRS_TYPE);
+    let types: HashSet<i64> = ch.elements.iter().filter(|e| e.tag.is_some() && e.tag == tt).map(|e| e.id as i64).collect();
+    let skl = sketch_lines(ch);
+    xs.into_iter()
+        .map(|e| {
+            let b = ch.body(e);
+            let q = |o: usize| if bits32 { i32_at(b, o) as i64 } else { i64_at(b, o) };
+            let k = (40..b.len().saturating_sub(2 * w).min(800)).find(|&o| lv.contains(&q(o)) && lv.contains(&q(o + w)));
+            let ty = (40..b.len().saturating_sub(w).min(800)).map(q).find(|v| types.contains(v));
+            let (bl, tl) = k.map_or((None, None), |k| (Some(q(k)), Some(q(k + w))));
+            LegacyStair {
+                id: e.id,
+                base_level: bl,
+                top_level: tl,
+                r#type: ty,
+                base_z: bl.and_then(|l| level_z.get(&l).copied()),
+                top_z: tl.and_then(|l| level_z.get(&l).copied()),
+                lines: skl.get(&(e.id as i64)).cloned().unwrap_or_default(),
+            }
+        })
+        .collect()
 }

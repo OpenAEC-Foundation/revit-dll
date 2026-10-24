@@ -18,7 +18,7 @@ mod walls;
 use std::collections::{HashMap, HashSet};
 
 use rvt_core::{read_partitions, vtag, Cfb, Chain, Element, Partition};
-use rvt_model::{CompoundType, DocumentInfo, ElementInfo, Floor, Instance, Level, MepSystem, Railing, RailingTypeInfo, Roof, Segment, Stair, Wall};
+use rvt_model::{CompoundType, DocumentInfo, ElementInfo, Floor, Instance, LegacyStair, Level, MepSystem, Railing, RailingTypeInfo, Roof, Segment, Stair, Wall};
 
 pub use rvt_core::{Error, Result};
 
@@ -414,6 +414,16 @@ impl Document {
             }
         }
         out
+    }
+
+    /// Old sketch-based stairs per project chain (step 1455), with the chain's own levels.
+    pub fn legacy_stairs_by_chain(&self) -> Vec<(String, usize, Vec<LegacyStair>)> {
+        let lz = |ch: &Chain| -> HashMap<i64, f64> { levels::levels(ch, &self.level_types).into_iter().map(|l| (l.id as i64, l.elevation)).collect() };
+        self.project_chains().map(|(p, ch)| (p.stream.clone(), ch.index, stairs::legacy_stairs(ch, &lz(ch)))).collect()
+    }
+
+    pub fn legacy_stairs(&self) -> Vec<LegacyStair> {
+        self.legacy_stairs_by_chain().into_iter().flat_map(|(_, _, s)| s).collect()
     }
 
     /// Stairs runs per project chain (step 722: width, base and top elevation).

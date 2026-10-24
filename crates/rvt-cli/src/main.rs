@@ -13,6 +13,7 @@ const USAGE: &str = "usage:
   rvt segments <file.rvt>              MEP segments (ducts, pipes, trays, conduits) and systems
   rvt railings <file.rvt>              railings (path, type, height, level)
   rvt stairs <file.rvt>                component stairs (riser, tread, levels, height, runs)
+  rvt legacy_stairs <file.rvt>         old sketch-based stairs (levels, type, sketch lines)
   rvt stairs_runs <file.rvt>           stairs runs (width, base and top elevation)
   rvt families <file.rvt>              family document chains and symbol -> family
   rvt solids <file.rvt>                extrusion solids per family chain
@@ -108,6 +109,12 @@ fn run(args: &[String]) -> Result<Value, String> {
             let chains: Vec<Value> =
                 doc.segments_by_chain().into_iter().map(|(s, i, v)| json!({"stream": s, "index": i, "segments": v})).collect();
             Ok(json!({"chains": chains, "systems": doc.systems()}))
+        }
+        "legacy_stairs" => {
+            let doc = rvt_read::Document::open(path).map_err(err)?;
+            let chains: Vec<Value> =
+                doc.legacy_stairs_by_chain().into_iter().map(|(s, i, v)| json!({"stream": s, "index": i, "legacy_stairs": v})).collect();
+            Ok(json!({"chains": chains}))
         }
         "stairs" => {
             let doc = rvt_read::Document::open(path).map_err(err)?;

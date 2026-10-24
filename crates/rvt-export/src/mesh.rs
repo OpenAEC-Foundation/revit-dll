@@ -821,6 +821,70 @@ pub fn scene(doc: &Document) -> Scene {
             }
         }
     }
+    // Old sketch stairs (step 2231): run lines in walking order; the riser lines crossing a run,
+    // sorted along it, each start a tread one riser high (rise = level difference / riser lines;
+    // the last line of a run is the step onto the landing or floor). Landings: a slab along each
+    // landing centre line, as wide as the run, extended by half that width at joints.
+    for st in doc.legacy_stairs() {
+        let (Some(zb), Some(zt)) = (st.base_z, st.top_z) else { continue };
+        let empty = Vec::new();
+        let get = |k: &str| st.lines.get(k).unwrap_or(&empty);
+        let (runs, risers, landings) = (get("run"), get("riser"), get("landing_center"));
+        let lines = |cs: &Vec<rvt_model::Curve>| -> Vec<(P3, P3)> {
+            cs.iter().filter_map(|c| Some(([c.p0?[0], c.p0?[1], 0.0], [c.p1?[0], c.p1?[1], 0.0]))).collect()
+        };
+        let (runs, risers, landings) = (lines(runs), lines(risers), lines(landings));
+        if risers.is_empty() || !(zt > zb) {
+            continue;
+        }
+        let rise = (zt - zb) / risers.len() as f64;
+        let b = batch!("Stairs", [0.70, 0.66, 0.60]);
+        let up = [0.0, 0.0, rise];
+        let mut k = 0usize;
+        let mut half = 1.5;
+        let mut landing_z = Vec::new();
+        for &(r0, r1) in &runs {
+            let Some(dir) = unit(sub(r1, r0)) else { continue };
+            let len = norm(sub(r1, r0));
+            // risers crossing this run: (position along the run, riser)
+            let mut on: Vec<(f64, (P3, P3))> = risers
+                .iter()
+                .filter_map(|&(a, c)| {
+                    let m = mul(add(a, c), 0.5);
+                    let t = dot(sub(m, r0), dir);
+                    let lat = norm(sub(sub(m, r0), mul(dir, t)));
+                    (t > -1e-3 && t < len + 1e-3 && lat < norm(sub(c, a)) / 2.0 + 1e-3).then_some((t, (a, c)))
+                })
+                .collect();
+            on.sort_by(|x, y| x.0.total_cmp(&y.0));
+            for (j, &(t, (a, c))) in on.iter().enumerate() {
+                half = norm(sub(c, a)) / 2.0;
+                if let Some(&(t1, _)) = on.get(j + 1) {
+                    let z0 = zb + rise * k as f64;
+                    let w = mul([-dir[1], dir[0], 0.0], half);
+                    let (p, q) = (add(r0, mul(dir, t)), add(r0, mul(dir, t1)));
+                    let (p, q) = ([p[0], p[1], z0], [q[0], q[1], z0]);
+                    let bot = [sub(p, w), sub(q, w), add(q, w), add(p, w)];
+                    b.hexa(bot, bot.map(|v| add(v, up)));
+                }
+                k += 1;
+            }
+            landing_z.push((zb + rise * (k as f64 - 1.0), half));
+        }
+        // the landing after the first run (the slab top meets the step onto it)
+        if let Some(&(z0, half)) = landing_z.first() {
+            for (i, &(a, c)) in landings.iter().enumerate() {
+                let Some(dir) = unit(sub(c, a)) else { continue };
+                let joined = |p: P3| landings.iter().enumerate().any(|(j, &(x, y))| j != i && (norm(sub(x, p)) < 1e-3 || norm(sub(y, p)) < 1e-3));
+                let a = if joined(a) { sub(a, mul(dir, half)) } else { a };
+                let c = if joined(c) { add(c, mul(dir, half)) } else { c };
+                let w = mul([-dir[1], dir[0], 0.0], half);
+                let (a, c) = ([a[0], a[1], z0], [c[0], c[1], z0]);
+                let bot = [sub(a, w), sub(c, w), add(c, w), add(a, w)];
+                b.hexa(bot, bot.map(|v| add(v, up)));
+            }
+        }
+    }
     let stair_by_id: std::collections::HashMap<u64, &Stair> = stairs.iter().map(|s| (s.id, s)).collect();
 
     let bits32 = doc.info().bits == Some(32);
