@@ -850,17 +850,86 @@ pub fn scene(doc: &Document) -> Scene {
     // regenerates the surface from its points.
     // step 2233: hidden group type definition copies (rac_basic: a second terrain over the same area)
     let hidden = doc.group_definition_ids();
-    for t in doc.topography().into_iter().filter(|t| !hidden.contains(&t.id)) {
-        let pts: Vec<delaunator::Point> = t.points.iter().map(|p| delaunator::Point { x: p[0], y: p[1] }).collect();
-        let tri = delaunator::triangulate(&pts);
-        if tri.triangles.is_empty() {
+    // Building pads (step 2234): a slab of the type thickness under level + offset; the terrain it
+    // cuts gets its outline (points every ≤ 1 ft, z from the terrain) and loses the triangles inside;
+    // vertical pit walls run from the slab bottom up to the terrain. The pad's own cut surface is
+    // not drawn (Revit: pit bottom = slab bottom, sides vertical).
+    let pads: Vec<(rvt_model::BuildingPad, Vec<Vec<[f64; 2]>>, f64, f64)> = doc
+        .building_pads()
+        .into_iter()
+        .filter_map(|p| {
+            let (groups, _) = plan_loops(p.outline.as_deref()?);
+            let outer = groups.into_iter().next()?.into_iter().next()?;
+            let top = p.level.and_then(|l| doc.level_elevation(l))? + p.height_offset.unwrap_or(0.0);
+            let th = p.r#type.and_then(|t| doc.type_thickness(t)).filter(|t| *t > 0.0).unwrap_or(1.0);
+            Some((p, vec![outer], top, th))
+        })
+        .collect();
+    let cut_surfaces: std::collections::HashSet<i64> = pads.iter().filter_map(|(p, ..)| p.cut_surface).collect();
+    for t in doc.topography().into_iter().filter(|t| !hidden.contains(&t.id) && !cut_surfaces.contains(&(t.id as i64))) {
+        let base = delaunator::triangulate(&t.points.iter().map(|p| delaunator::Point { x: p[0], y: p[1] }).collect::<Vec<_>>());
+        if base.triangles.is_empty() {
             continue;
         }
+        // terrain height in plan from the plain triangulation
+        let z_at = |x: f64, y: f64| -> Option<f64> {
+            base.triangles.chunks_exact(3).find_map(|c| {
+                let (a, b, c) = (t.points[c[0]], t.points[c[1]], t.points[c[2]]);
+                let d = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]);
+                if d.abs() < 1e-12 {
+                    return None;
+                }
+                let l1 = ((b[1] - c[1]) * (x - c[0]) + (c[0] - b[0]) * (y - c[1])) / d;
+                let l2 = ((c[1] - a[1]) * (x - c[0]) + (a[0] - c[0]) * (y - c[1])) / d;
+                let l3 = 1.0 - l1 - l2;
+                (l1 > -1e-9 && l2 > -1e-9 && l3 > -1e-9).then(|| l1 * a[2] + l2 * b[2] + l3 * c[2])
+            })
+        };
+        let mine: Vec<&(rvt_model::BuildingPad, Vec<Vec<[f64; 2]>>, f64, f64)> =
+            pads.iter().filter(|(p, ..)| p.topo == Some(t.id as i64)).collect();
+        let mut pts = t.points.clone();
+        let mut rims: Vec<Vec<P3>> = Vec::new();
+        for (_, loops, ..) in &mine {
+            let l = &loops[0];
+            let mut rim = Vec::new();
+            for i in 0..l.len() {
+                let (a, b) = (l[i], l[(i + 1) % l.len()]);
+                let n = ((((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt()).ceil() as usize).max(1);
+                for k in 0..n {
+                    let f = k as f64 / n as f64;
+                    let (x, y) = (a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f);
+                    if let Some(z) = z_at(x, y) {
+                        rim.push([x, y, z]);
+                    }
+                }
+            }
+            pts.extend(rim.iter().copied());
+            rims.push(rim);
+        }
+        let tri = if mine.is_empty() { base } else { delaunator::triangulate(&pts.iter().map(|p| delaunator::Point { x: p[0], y: p[1] }).collect::<Vec<_>>()) };
         let b = batch!("Topography", [0.56, 0.64, 0.44]);
         for c in tri.triangles.chunks_exact(3) {
-            let (p, q, r) = (t.points[c[0]], t.points[c[1]], t.points[c[2]]);
+            let (p, q, r) = (pts[c[0]], pts[c[1]], pts[c[2]]);
+            let m = [(p[0] + q[0] + r[0]) / 3.0, (p[1] + q[1] + r[1]) / 3.0];
+            if mine.iter().any(|(_, loops, ..)| point_in(m, &loops[0])) {
+                continue;
+            }
             b.tri(p, r, q);
         }
+        // pit walls from the slab bottom up to the terrain along the outline
+        for ((_, _, top, th), rim) in mine.iter().copied().zip(&rims) {
+            let zb = top - th;
+            for i in 0..rim.len() {
+                let (a, c) = (rim[i], rim[(i + 1) % rim.len()]);
+                if a[2] > zb || c[2] > zb {
+                    b.quad([a[0], a[1], zb], [c[0], c[1], zb], [c[0], c[1], c[2].max(zb)], [a[0], a[1], a[2].max(zb)]);
+                }
+            }
+        }
+    }
+    for (_, loops, top, th) in &pads {
+        let b = batch!("Pads", [0.66, 0.60, 0.52]);
+        b.prism(loops, top - th, *top);
     }
     // Old sketch stairs (step 2231): run lines in walking order; the riser lines crossing a run,
     // sorted along it, each start a tread one riser high (rise = level difference / riser lines;

@@ -9,6 +9,7 @@ mod hosted;
 mod instances;
 mod levels;
 mod mep;
+mod pads;
 mod railings;
 mod slabs;
 mod solids;
@@ -430,6 +431,15 @@ impl Document {
     /// Ids of hidden group type definition copies (not drawn).
     pub fn group_definition_ids(&self) -> HashSet<u64> {
         self.group_definition_members_by_chain().into_iter().flat_map(|(_, _, v)| v.into_iter().map(|m| m.id)).collect()
+    }
+
+    /// Building pads per project chain (step 1672).
+    pub fn building_pads_by_chain(&self) -> Vec<(String, usize, Vec<rvt_model::BuildingPad>)> {
+        self.project_chains().map(|(p, ch)| (p.stream.clone(), ch.index, pads::building_pads(ch))).collect()
+    }
+
+    pub fn building_pads(&self) -> Vec<rvt_model::BuildingPad> {
+        self.building_pads_by_chain().into_iter().flat_map(|(_, _, v)| v).collect()
     }
 
     /// Topography surfaces per project chain (step 1532).

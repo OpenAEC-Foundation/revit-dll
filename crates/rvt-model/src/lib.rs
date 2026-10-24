@@ -546,3 +546,26 @@ pub struct GroupDefinitionMember {
     pub id: u64,
     pub group_type: i64,
 }
+
+/// Building pad (step 1672): level, phase, type, the topography it cuts and its cut surface, the
+/// height offset from the level and the outline from its own sketch.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct BuildingPad {
+    pub id: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<i64>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topo: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cut_surface: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height_offset: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sketch: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outline: Option<Vec<Curve>>,
+}
