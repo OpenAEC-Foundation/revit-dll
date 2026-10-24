@@ -1855,7 +1855,12 @@ pub fn scene(doc: &Document) -> Scene {
                         // windows)
                         let opening = matches!(i.cat, -2000023 | -2000014);
                         let factor = |k: usize| (ehi[k] - elo[k]) / (shi[k] - slo[k]);
-                        let keep: [bool; 3] = std::array::from_fn(|k| opening && shi[k] - slo[k] > 1e-6 && factor(k) > 2.0 && (k != 2 || factor(k) > 4.0));
+                        // step 2250: for every category, an axis whose stored box is far larger than
+                        // the shape (rme troffers: box 2 ft high, Revit's shape 0.49 ft) keeps the
+                        // family size; doors and windows as before
+                        let keep: [bool; 3] = std::array::from_fn(|k| {
+                            shi[k] - slo[k] > 1e-6 && if opening { factor(k) > 2.0 && (k != 2 || factor(k) > 4.0) } else { factor(k) > 2.0 && !(matches!(i.cat, -2000100 | -2001330) && k == 2) }
+                        });
                         let plausible = (0..3).all(|k| {
                             let se = shi[k] - slo[k];
                             // step 2240: a column's length is fully parametric (vertical axis free)
