@@ -1184,6 +1184,37 @@ pub fn scene(doc: &Document) -> Scene {
         if ext.iter().any(|v| !(v.is_finite() && *v >= 0.0 && *v < 1e4)) || ext.iter().all(|v| *v < 1e-6) {
             continue;
         }
+        // Step 2235: RPC planting (no solids in its family) as Revit shows it: two crossed vertical
+        // silhouettes (trunk and crown) at the placement, height = the stored box height, width =
+        // the larger plan extent / √2 (Revit GT: 13.8/19.3/25 ft against 13.8/19/25.4).
+        if i.cat == -2001360 {
+            if let (Some(sym), Some(o), Some(m)) = (i.symbol, i.origin, i.rotation) {
+                if solids_of(sym).is_empty() && sweeps_of(sym).is_empty() && blrev_of(sym).is_empty() {
+                    let h = ext[2];
+                    let half = ext[0].max(ext[1]) / std::f64::consts::SQRT_2 / 2.0;
+                    // outline (u across, v up), crown as an octagon-like shape on a trunk
+                    let outline: [(f64, f64); 12] = [
+                        (-0.05, 0.0), (0.05, 0.0), (0.05, 0.28), (0.55, 0.36), (0.95, 0.55), (0.85, 0.80),
+                        (0.45, 1.0), (-0.45, 1.0), (-0.85, 0.80), (-0.95, 0.55), (-0.55, 0.36), (-0.05, 0.28),
+                    ];
+                    let b = batch!("Planting", [0.35, 0.55, 0.30]);
+                    let z0 = o[2].max(bb[2]) - o[2];
+                    for axis in [[1.0, 0.0], [0.0, 1.0]] {
+                        let pt = |u: f64, v: f64| place(o, &m, [axis[0] * u * half, axis[1] * u * half, z0 + v * h]);
+                        let pts: Vec<P3> = outline.iter().map(|&(u, v)| pt(u, v)).collect();
+                        // fan from the trunk top centre, both faces
+                        let c = pt(0.0, 0.6);
+                        for k in 0..pts.len() {
+                            let (p, q) = (pts[k], pts[(k + 1) % pts.len()]);
+                            b.tri(c, p, q);
+                            b.tri(c, q, p);
+                        }
+                    }
+                    n_family += 1;
+                    continue;
+                }
+            }
+        }
         // A stored box that is large in all three directions (> 3 m) covers more than the family
         // itself (site, massing or nested content); drawing it hides the building.
         if ext.iter().all(|v| *v * FT > 3.0) {
