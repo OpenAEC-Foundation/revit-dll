@@ -766,20 +766,25 @@ fn segment_batch(cat: Option<i32>) -> (&'static str, [f32; 3]) {
 
 /// Builds the viewer scene of a document.
 pub fn scene(doc: &Document) -> Scene {
+    // Step 2259: hidden group definition copies (S2233) are not drawn, whatever their kind. Their
+    // group is none of the type's placed groups (Revit API: snowdon arch 2025 282/282 members of
+    // groups outside GroupType.Groups and outside the Group collector; rac_basic fixture 800336, rme
+    // 6 pipe insulations: absent from Revit's {3D} geometry).
+    let group_defs = doc.group_definition_ids();
     // step 2227: the expensive readers once
     let walls_all = {
         // step 2228: one record per id (a wall can appear in two project chains)
         let mut seen = std::collections::HashSet::new();
         // step 2238: walls inside an in-place family are not separate walls
         let inplace = doc.inplace_ids();
-        doc.walls().into_iter().filter(|w| seen.insert(w.id) && !inplace.contains(&w.id)).collect::<Vec<_>>()
+        doc.walls().into_iter().filter(|w| seen.insert(w.id) && !inplace.contains(&w.id) && !group_defs.contains(&w.id)).collect::<Vec<_>>()
     };
     // step 2228: an element can appear in two project chains (Storax: 366 copies in a second chain,
     // mostly without a type); keep one record per id, the one with a type
     let insts_all: Vec<Instance> = {
         let mut by_id: Vec<Instance> = Vec::new();
         let mut at: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
-        for i in doc.instances() {
+        for i in doc.instances().into_iter().filter(|i| !group_defs.contains(&i.id)) {
             match at.get(&i.id) {
                 Some(&k) => {
                     if by_id[k].symbol.is_none() && i.symbol.is_some() {
@@ -1006,7 +1011,7 @@ pub fn scene(doc: &Document) -> Scene {
         eprintln!("wall {id} {:.2}", wall_area(batches.get("Walls"), n0));
     }
     let slab = slab_into;
-    for f in doc.floors() {
+    for f in doc.floors().into_iter().filter(|f| !group_defs.contains(&f.id)) {
         let t = f.thickness.filter(|t| *t > 0.0).unwrap_or(0.5);
         // step 2239: a foundation slab is a Floor of category Structural Foundations
         let b = if doc.element(f.id).map(|e| e.category) == Some(-2001300) {
@@ -1016,15 +1021,15 @@ pub fn scene(doc: &Document) -> Scene {
         };
         slab(b, &f.curves, f.top_z, t, true);
     }
-    for f in doc.ceilings() {
+    for f in doc.ceilings().into_iter().filter(|f| !group_defs.contains(&f.id)) {
         let t = f.thickness.filter(|t| *t > 0.0).unwrap_or(0.08);
         slab(batch!("Ceilings", [0.93, 0.92, 0.90]), &f.curves, f.top_z, t, false);
     }
-    for r in doc.roofs() {
+    for r in doc.roofs().into_iter().filter(|r| !group_defs.contains(&r.id)) {
         roof_into(batch!("Roofs", [0.60, 0.30, 0.18]), &r);
     }
 
-    let segs: Vec<Segment> = doc.segments();
+    let segs: Vec<Segment> = doc.segments().into_iter().filter(|s| !group_defs.contains(&s.id)).collect();
     for s in &segs {
         let cat = doc.element(s.id).map(|e| e.category);
         let (name, color) = segment_batch(cat);
@@ -1059,7 +1064,7 @@ pub fn scene(doc: &Document) -> Scene {
     // Stairs (§33): per run, one block per tread along the walk path, each a riser high and as wide
     // as the run (step 722; 3 ft if unknown), rising by one riser per tread from the run's base
     // elevation (absolute, step 2211), or from the stair base counted over the runs.
-    let stairs = doc.stairs();
+    let stairs: Vec<_> = doc.stairs().into_iter().filter(|s| !group_defs.contains(&s.id)).collect();
     let runs: std::collections::HashMap<u64, rvt_model::StairsRun> = doc.stairs_runs().into_iter().map(|r| (r.id, r)).collect();
     for st in &stairs {
         let Some(zb) = st.base_z else { continue };
@@ -1409,7 +1414,7 @@ pub fn scene(doc: &Document) -> Scene {
     let stair_by_id: std::collections::HashMap<u64, &Stair> = stairs.iter().map(|s| (s.id, s)).collect();
 
     let bits32 = doc.info().bits == Some(32);
-    for r in doc.railings() {
+    for r in doc.railings().into_iter().filter(|r| !group_defs.contains(&r.id)) {
         let info = r.type_info.as_ref();
         // step 2204: 64-bit top rail height first (Railing Height is 0 for some types); 32-bit
         // Railing Height first (its top rail fields read as 4.0 / type 4 there)
