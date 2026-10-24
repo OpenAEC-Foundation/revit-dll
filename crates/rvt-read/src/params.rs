@@ -17,21 +17,13 @@ fn utf16(s: &str) -> Vec<u8> {
     s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect()
 }
 
-/// Python's `str.isprintable` for the characters that occur here: no control, format, separator
-/// (other than the ASCII space), surrogate or private-use characters.
+/// Python's `str.isprintable` (step 2263: the full table, including unassigned code points; snowdon
+/// arch 2025: an IES file stored as bytes read as UTF-16 holds U+0A0D, unassigned).
 fn printable(s: &str) -> bool {
     s.chars().all(|c| {
         let u = c as u32;
-        !(u < 0x20
-            || (0x7f..=0xa0).contains(&u)
-            || u == 0xad
-            || u == 0x1680
-            || (0x2000..=0x200f).contains(&u)
-            || (0x2028..=0x202f).contains(&u)
-            || (0x205f..=0x2064).contains(&u)
-            || u == 0x3000
-            || u == 0xfeff
-            || (0xe000..=0xf8ff).contains(&u))
+        let k = crate::printable_table::NOT_PRINTABLE.partition_point(|&(_, hi)| hi < u);
+        !crate::printable_table::NOT_PRINTABLE.get(k).is_some_and(|&(lo, _)| lo <= u)
     })
 }
 

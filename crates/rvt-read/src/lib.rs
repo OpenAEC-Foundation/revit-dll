@@ -11,6 +11,7 @@ mod levels;
 mod mep;
 mod pads;
 mod params;
+mod printable_table;
 mod railings;
 mod slabs;
 mod solids;
@@ -556,10 +557,19 @@ impl Document {
 
     /// Type values (§9.2) of the symbols in each project chain: symbol id -> value set (the last
     /// set per owner, like the reference `type_values`).
+    /// Step 2263: parameters of chain 0 of every partition count (snowdon arch 2025: a project over
+    /// Partitions/122 and /124; family parameters in /122, symbols in /124).
     pub fn type_values_by_chain(&self) -> Vec<(String, usize, std::collections::BTreeMap<u64, rvt_model::ValueSet>)> {
+        let global: HashSet<u64> = self
+            .partitions
+            .iter()
+            .filter_map(|p| p.chains.first().filter(|c| c.bits.is_some()))
+            .flat_map(|ch| params::parameter_names(ch).into_keys())
+            .collect();
         self.project_chains()
             .map(|(p, ch)| {
-                let prm: HashSet<u64> = params::parameter_names(ch).into_keys().collect();
+                let mut prm: HashSet<u64> = params::parameter_names(ch).into_keys().collect();
+                prm.extend(global.iter().copied());
                 let sets = params::value_sets(ch, &prm, &[2022]);
                 (p.stream.clone(), ch.index, sets.into_iter().map(|s| (s.owner, s)).collect())
             })
