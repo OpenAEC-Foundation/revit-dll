@@ -132,6 +132,9 @@ pub struct Level {
 /// fields of its kind are set, as in the reference export.
 #[derive(Debug, Clone, Serialize, PartialEq, Default)]
 pub struct Curve {
+    /// Curve element id; 0 for curves read from a block without an element (pick paths), which
+    /// the reference writes without an id.
+    #[serde(skip_serializing_if = "is_zero")]
     pub id: u64,
     /// "line", "arc", "ellipse" or "circle".
     #[serde(rename = "type")]
@@ -465,4 +468,8 @@ pub struct SweepSolid {
     pub y: [f64; 3],
     #[serde(rename = "N")]
     pub n: [f64; 3],
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
 }

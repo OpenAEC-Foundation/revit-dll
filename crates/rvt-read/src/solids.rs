@@ -246,7 +246,36 @@ pub(crate) fn sweep_solids(ch: &Chain) -> Vec<rvt_model::SweepSolid> {
             ((l > 152).then(|| bd[149] == 1), (l >= 231).then(|| (u64_at(bd, 174), u64_at(bd, 223))))
         };
         let Some((ps, pa)) = sketches else { continue };
-        let (prof, path) = (cv(ps), cv(pa));
+        let (prof, mut path) = (cv(ps), cv(pa));
+        // step 565: pick path (path sketch = −1): curve blocks in the path list element
+        let mut frame: Option<([f64; 3], [f64; 3], [f64; 3])> = None;
+        if path.is_empty() && pa == u64::MAX {
+            path = pick_path(ch, &byid, e.id, bits32);
+            // plane from two non-parallel lines (reference order: first pair found)
+            let ds: Vec<[f64; 3]> = path
+                .iter()
+                .filter_map(|c| match (c.p0, c.p1) {
+                    (Some(a), Some(b)) => Some([b[0] - a[0], b[1] - a[1], b[2] - a[2]]),
+                    _ => None,
+                })
+                .collect();
+            if path.len() >= 2 {
+                'outer: for a in &ds {
+                    for b in &ds {
+                        let nv = [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+                        let l = (nv[0] * nv[0] + nv[1] * nv[1] + nv[2] * nv[2]).sqrt();
+                        if l > 1e-6 {
+                            let la = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
+                            let x = [a[0] / la, a[1] / la, a[2] / la];
+                            let n = [nv[0] / l, nv[1] / l, nv[2] / l];
+                            let y = [n[1] * x[2] - n[2] * x[1], n[2] * x[0] - n[0] * x[2], n[0] * x[1] - n[1] * x[0]];
+                            frame = Some((x, y, n));
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
         if prof.is_empty() || path.is_empty() {
             continue;
         }
@@ -258,12 +287,66 @@ pub(crate) fn sweep_solids(ch: &Chain) -> Vec<rvt_model::SweepSolid> {
                 _ => vec![],
             })
             .collect();
-        let fr = byid.get(&pa).and_then(|sk| sketch_frame(ch.body(sk), &pts));
-        let (x, y, n) = match fr {
-            Some([_, x, y, n]) => (x, y, n),
-            None => ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]),
-        };
+        let fr = frame.or_else(|| byid.get(&pa).and_then(|sk| sketch_frame(ch.body(sk), &pts)).map(|[_, x, y, n]| (x, y, n)));
+        let (x, y, n) = fr.unwrap_or(([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]));
         out.push(rvt_model::SweepSolid { id: e.id, void, profile: prof, path, x, y, n });
+    }
+    out
+}
+
+/// §8.12b (steps 564–565, 1123, 2166): curves of a pick-path sweep. 64-bit: in the path list
+/// element (sweep @231, tag 3204; otherwise every element naming the sweep) the §6 blocks after
+/// `ff×8 | u32 | 00×4 | 04 00`; 32-bit: path element i32 @163, blocks at marker
+/// `ffffffff 04 00 .. 01` − 4. The fallback through curve elements (steps 1110, 2166) is not ported.
+fn pick_path(ch: &Chain, byid: &HashMap<u64, &Element>, sweep: u64, bits32: bool) -> Vec<Curve> {
+    let mut out = Vec::new();
+    let sb: &[u8] = byid.get(&sweep).map(|e| ch.body(e)).unwrap_or(&[]);
+    if bits32 {
+        let Some(pe) = (sb.len() >= 167).then(|| i32_at(sb, 163) as i64).filter(|v| *v >= 0).and_then(|v| byid.get(&(v as u64))) else {
+            return out;
+        };
+        let pb = ch.body(pe);
+        let mk = [0xffu8, 0xff, 0xff, 0xff, 0x04, 0x00];
+        let mut k = 0;
+        while let Some(f) = find(&pb[k..], &mk).map(|x| x + k) {
+            if f >= 4 && f + 7 < pb.len() && pb[f + 7] == 1 {
+                if let Some(b) = block(pb, f - 4) {
+                    out.push(b.to_curve(0));
+                }
+            }
+            k = f + 1;
+        }
+        return out;
+    }
+    let key = sweep.to_le_bytes();
+    let pt = vtag(ch.version, 3204);
+    let pe = (sb.len() >= 239)
+        .then(|| i64_at(sb, 231))
+        .filter(|v| *v >= 0)
+        .and_then(|v| byid.get(&(v as u64)))
+        .filter(|e| e.tag.is_some() && e.tag == pt);
+    let cand: Vec<&Element> = match pe {
+        Some(e) => vec![*e],
+        None => ch.elements.iter().collect(),
+    };
+    for e in cand {
+        if e.id == sweep {
+            continue;
+        }
+        let b = ch.body(e);
+        if find(b, &key).is_none() {
+            continue;
+        }
+        for o in 0..b.len().saturating_sub(20) {
+            if b[o..o + 8] == [0xff; 8] && b[o + 12..o + 16] == [0; 4] && b[o + 16] == 4 && b[o + 17] == 0 {
+                if let Some(bl) = block(b, o + 8) {
+                    out.push(bl.to_curve(0));
+                }
+            }
+        }
+        if !out.is_empty() {
+            return out;
+        }
     }
     out
 }
