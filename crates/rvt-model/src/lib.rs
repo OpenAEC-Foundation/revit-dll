@@ -596,3 +596,48 @@ pub struct Column {
     pub top_offset: f64,
     pub height: Option<f64>,
 }
+
+/// Flex duct (§15.6): centre line points, end tangents, type, system and level.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct FlexCurve {
+    pub id: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<&'static str>,
+    pub points: Vec<[f64; 3]>,
+    pub start_tangent: [f64; 3],
+    pub end_tangent: [f64; 3],
+    pub system: Option<u64>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub flex_type: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<i64>,
+}
+
+/// Other MEP curve (step 702): pipe, cable tray or conduit with the segment layout, or a flex pipe
+/// with points.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct MepCurve {
+    pub id: u64,
+    pub kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p0: Option<[f64; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p1: Option<[f64; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub round: Option<bool>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub segment_type: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub points: Option<Vec<[f64; 3]>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_tangent: Option<[f64; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_tangent: Option<[f64; 3]>,
+    pub system: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<i64>,
+}

@@ -15,6 +15,7 @@ const USAGE: &str = "usage:
   rvt stairs <file.rvt>                component stairs (riser, tread, levels, height, runs)
   rvt legacy_stairs <file.rvt>         old sketch-based stairs (levels, type, sketch lines)
   rvt topography <file.rvt>            topography surfaces (terrain points)
+  rvt flex|mep_curves <file.rvt>       flex ducts; pipes, trays, conduits, flex pipes
   rvt columns <file.rvt>               columns: level block and height
   rvt inplace_members <file.rvt>       content of in-place families
   rvt wall_attachments <file.rvt>      walls attached to roofs/floors/ceilings
@@ -147,6 +148,17 @@ fn run(args: &[String]) -> Result<Value, String> {
             let doc = rvt_read::Document::open(path).map_err(err)?;
             let chains: Vec<Value> =
                 doc.columns_by_chain().into_iter().map(|(s, i, v)| json!({"stream": s, "index": i, "columns": v})).collect();
+            Ok(json!({"chains": chains}))
+        }
+        "flex" => {
+            let doc = rvt_read::Document::open(path).map_err(err)?;
+            let chains: Vec<Value> = doc.flex_by_chain().into_iter().map(|(s, i, v)| json!({"stream": s, "index": i, "flex": v})).collect();
+            Ok(json!({"chains": chains}))
+        }
+        "mep_curves" => {
+            let doc = rvt_read::Document::open(path).map_err(err)?;
+            let chains: Vec<Value> =
+                doc.mep_curves_by_chain().into_iter().map(|(s, i, v)| json!({"stream": s, "index": i, "mep_curves": v})).collect();
             Ok(json!({"chains": chains}))
         }
         "topography" => {

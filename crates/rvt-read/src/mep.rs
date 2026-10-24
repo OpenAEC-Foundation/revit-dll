@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use rvt_core::{vtag, Chain, Element};
-use rvt_model::{MepSystem, Segment};
+use rvt_model::{MepSystem, Segment, FlexCurve, MepCurve};
 
 use crate::util::{f64_at, i32_at, i64_at, u32_at, u64_at};
 
@@ -170,4 +170,136 @@ pub(crate) fn segments(ch: &Chain, systems: &HashSet<u64>) -> Vec<Segment> {
             segment(ch, e).map(|s| Segment { system: system_of(ch, e, systems), level: curve_level(ch, ch.body(e), &levels), ..s })
         })
         .collect()
+}
+
+const TAG_FLEX_DUCT: u16 = 3470;
+const TAG_FLEX_PIPE: u16 = 3473;
+const TAG_PIPE: u16 = 3503;
+const TAG_CABLE_TRAY: u16 = 694;
+const TAG_CONDUIT: u16 = 3427;
+
+fn d3(b: &[u8], o: usize) -> [f64; 3] {
+    [f64_at(b, o), f64_at(b, o + 8), f64_at(b, o + 16)]
+}
+
+/// Flex ducts (tag 3470, §15.6; steps 250, 1130, 2032, 2033, 2034, 2159): points `u32 n @294 | n × 3
+/// f64` (rme 2026 header variant +2 B: n @296), tangents @242/@266, FlexDuctType i64 @204. 32-bit:
+/// n @252, points @256, tangents @200/@224, type i32 @178 (2023: geometry 4 B earlier; 2014: 1 B).
+pub(crate) fn flex_ducts(ch: &Chain, systems: &HashSet<u64>) -> Vec<FlexCurve> {
+    let Some(t) = vtag(ch.version, TAG_FLEX_DUCT) else { return vec![] };
+    let levels: HashSet<i64> = ch.elements.iter().filter(|e| e.cat == -2000240).map(|e| e.id as i64).collect();
+    let bits32 = ch.bits == Some(32);
+    let mut out = Vec::new();
+    for e in ch.elements.iter().filter(|e| e.tag == Some(t) && e.bbox.is_some()) {
+        let bd = ch.body(e);
+        let n_at = |o: usize| if bd.len() >= o + 4 { u32_at(bd, o) as usize } else { 0 };
+        let r = if bits32 && e.cat == -2008020 {
+            let mut d: isize = if ch.version == Some(2023) { -4 } else { 0 };
+            let at = |o: usize, d: isize| (o as isize + d) as usize;
+            let mut n = if bd.len() > 256 { n_at(at(252, d)) } else { 0 };
+            if !((2..=64).contains(&n) && at(256, d) + 24 * n <= bd.len()) && bd.len() > 255 {
+                n = n_at(251);
+                d = -1;
+            }
+            ((2..=64).contains(&n) && at(256, d) + 24 * n <= bd.len()).then(|| FlexCurve {
+                id: e.id,
+                kind: None,
+                points: (0..n).map(|k| d3(bd, at(256, d) + 24 * k)).collect(),
+                start_tangent: d3(bd, at(200, d)),
+                end_tangent: d3(bd, at(224, d)),
+                system: system_of(ch, e, systems),
+                flex_type: Some(i32_at(bd, 178) as i64).filter(|v| *v > 0),
+                level: None,
+            })
+        } else {
+            let mut n = n_at(294);
+            let mut sh = 0;
+            if !(2..=64).contains(&n) && bd.len() > 300 {
+                let n2 = n_at(296);
+                if (2..=64).contains(&n2) && 300 + 24 * n2 <= bd.len() {
+                    n = n2;
+                    sh = 2;
+                }
+            }
+            ((2..=64).contains(&n) && 298 + sh + 24 * n <= bd.len()).then(|| FlexCurve {
+                id: e.id,
+                kind: None,
+                points: (0..n).map(|k| d3(bd, 298 + sh + 24 * k)).collect(),
+                start_tangent: d3(bd, 242 + sh),
+                end_tangent: d3(bd, 266 + sh),
+                system: system_of(ch, e, systems),
+                flex_type: (bd.len() >= 212 + sh).then(|| i64_at(bd, 204 + sh)).filter(|v| *v > 0),
+                level: None,
+            })
+        };
+        if let Some(mut r) = r {
+            r.level = curve_level(ch, bd, &levels);
+            out.push(r);
+        }
+    }
+    out
+}
+
+/// Step 702: the other MEP curves with the segment layout (§15.1): pipe 3503, cable tray 694,
+/// conduit 3427 (step 1156: else by category, when the record has a box and is not a type), and
+/// flex pipes (3473) with points like flex ducts.
+pub(crate) fn mep_curves(ch: &Chain, systems: &HashSet<u64>) -> Vec<MepCurve> {
+    let levels: HashSet<i64> = ch.elements.iter().filter(|e| e.cat == -2000240).map(|e| e.id as i64).collect();
+    let kinds = [(vtag(ch.version, TAG_PIPE), "pipe"), (vtag(ch.version, TAG_CABLE_TRAY), "cable_tray"), (vtag(ch.version, TAG_CONDUIT), "conduit")];
+    let types: HashSet<Option<u16>> = [3520u16, 3418, 3428].iter().map(|t| vtag(ch.version, *t)).collect();
+    let flex_pipe = vtag(ch.version, TAG_FLEX_PIPE);
+    let mut out = Vec::new();
+    for e in ch.elements.iter() {
+        let mut kind = kinds.iter().find(|(t, _)| t.is_some() && *t == e.tag).map(|(_, k)| *k);
+        if kind.is_none() && e.bbox.is_some() && !types.contains(&e.tag) {
+            kind = match e.cat {
+                -2008044 => Some("pipe"),
+                -2008130 => Some("cable_tray"),
+                -2008132 => Some("conduit"),
+                _ => None,
+            };
+        }
+        if let Some(k) = kind {
+            if let Some(s) = segment(ch, e) {
+                out.push(MepCurve {
+                    id: e.id,
+                    kind: k,
+                    p0: Some(s.p0),
+                    p1: Some(s.p1),
+                    width: Some(s.width),
+                    height: Some(s.height),
+                    round: Some(s.round),
+                    segment_type: s.segment_type,
+                    points: None,
+                    start_tangent: None,
+                    end_tangent: None,
+                    system: system_of(ch, e, systems),
+                    level: curve_level(ch, ch.body(e), &levels),
+                });
+                continue;
+            }
+        }
+        if flex_pipe.is_some() && e.tag == flex_pipe && e.bbox.is_some() {
+            let bd = ch.body(e);
+            let n = if bd.len() > 298 { u32_at(bd, 294) as usize } else { 0 };
+            if (2..=64).contains(&n) && 298 + 24 * n <= bd.len() {
+                out.push(MepCurve {
+                    id: e.id,
+                    kind: "flex_pipe",
+                    p0: None,
+                    p1: None,
+                    width: None,
+                    height: None,
+                    round: None,
+                    segment_type: None,
+                    points: Some((0..n).map(|k| d3(bd, 298 + 24 * k)).collect()),
+                    start_tangent: Some(d3(bd, 242)),
+                    end_tangent: Some(d3(bd, 266)),
+                    system: system_of(ch, e, systems),
+                    level: curve_level(ch, bd, &levels),
+                });
+            }
+        }
+    }
+    out
 }

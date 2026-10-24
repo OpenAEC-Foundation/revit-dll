@@ -480,6 +480,18 @@ impl Document {
         self.columns_by_chain().into_iter().flat_map(|(_, _, v)| v).collect()
     }
 
+    /// Flex ducts per project chain (§15.6).
+    pub fn flex_by_chain(&self) -> Vec<(String, usize, Vec<rvt_model::FlexCurve>)> {
+        let sys = self.system_ids();
+        self.project_chains().map(|(p, ch)| (p.stream.clone(), ch.index, mep::flex_ducts(ch, &sys))).collect()
+    }
+
+    /// Pipes, cable trays, conduits and flex pipes per project chain (step 702).
+    pub fn mep_curves_by_chain(&self) -> Vec<(String, usize, Vec<rvt_model::MepCurve>)> {
+        let sys = self.system_ids();
+        self.project_chains().map(|(p, ch)| (p.stream.clone(), ch.index, mep::mep_curves(ch, &sys))).collect()
+    }
+
     /// Topography surfaces per project chain (step 1532).
     pub fn topography_by_chain(&self) -> Vec<(String, usize, Vec<Topography>)> {
         self.project_chains().map(|(p, ch)| (p.stream.clone(), ch.index, topography::topography(ch))).collect()

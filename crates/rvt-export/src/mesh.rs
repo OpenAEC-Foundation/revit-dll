@@ -979,6 +979,27 @@ pub fn scene(doc: &Document) -> Scene {
         let (name, color) = segment_batch(cat);
         batch!(name, color).member(s.p0, s.p1, s.width, s.height, s.round);
     }
+    // step 2248: pipes, cable trays and conduits like segments; flex ducts and pipes along their
+    // points (diameter from the type not read yet: 0.5 ft resp. 0.1 ft)
+    for c in doc.mep_curves_by_chain().into_iter().flat_map(|(_, _, v)| v) {
+        let (name, color) = match c.kind {
+            "pipe" => ("Pipes", [0.30, 0.70, 0.45]),
+            "flex_pipe" => ("Pipes", [0.30, 0.70, 0.45]),
+            _ => ("Cable trays and conduits", [0.85, 0.55, 0.20]),
+        };
+        if let (Some(p0), Some(p1), Some(w), Some(h), Some(r)) = (c.p0, c.p1, c.width, c.height, c.round) {
+            batch!(name, color).member(p0, p1, w, h, r);
+        } else if let Some(pts) = &c.points {
+            for s in pts.windows(2) {
+                batch!(name, color).member(s[0], s[1], 0.1, 0.1, true);
+            }
+        }
+    }
+    for f in doc.flex_by_chain().into_iter().flat_map(|(_, _, v)| v) {
+        for s in f.points.windows(2) {
+            batch!("Ducts", [0.35, 0.60, 0.80]).member(s[0], s[1], 0.5, 0.5, true);
+        }
+    }
 
     // Railings (§35): top rail along the path at the railing (or top rail) height, posts at most
     // 3 ft apart. The base is the railing's level plus its base offset when it has a level
