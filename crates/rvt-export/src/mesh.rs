@@ -575,6 +575,36 @@ fn revolve_triangles(r: &RevolveSolid) -> Vec<[P3; 3]> {
     out
 }
 
+/// Step 2254: detail-level variants. Extrusions with the same plane, origin, range and profile
+/// bounds are one form drawn per detail level (rst steel columns: an I-profile of 12 and one of 16
+/// curves); keep the finest (most profile curves), as Revit shows at Fine.
+fn finest_variants<'a>(solids: Vec<&'a ExtrusionSolid>) -> Vec<&'a ExtrusionSolid> {
+    let key = |s: &ExtrusionSolid| -> Vec<i64> {
+        let pts: Vec<P3> = s.profile.iter().flat_map(|c| c.p0.into_iter().chain(c.p1).chain(c.center)).collect();
+        let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+        for q in &pts {
+            for k in 0..3 {
+                lo[k] = lo[k].min(q[k]);
+                hi[k] = hi[k].max(q[k]);
+            }
+        }
+        [s.start, s.end].iter().chain(s.n.iter()).chain(s.o.iter()).chain(lo.iter()).chain(hi.iter()).map(|v| (v * 1e4).round() as i64).collect()
+    };
+    let mut best: Vec<(Vec<i64>, &'a ExtrusionSolid)> = Vec::new();
+    for sld in solids {
+        let k = key(sld);
+        match best.iter_mut().find(|(bk, _)| *bk == k) {
+            Some(entry) => {
+                if sld.profile.len() > entry.1.profile.len() {
+                    entry.1 = sld;
+                }
+            }
+            None => best.push((k, sld)),
+        }
+    }
+    best.into_iter().map(|(_, sld)| sld).collect()
+}
+
 /// Triangles of a family's extrusion solids in family (local) coordinates.
 fn family_triangles(solids: &[&ExtrusionSolid]) -> Vec<[P3; 3]> {
     let xf = |p: P3| -> P3 { p };
@@ -1416,7 +1446,7 @@ pub fn scene(doc: &Document) -> Scene {
             .get(&sym)
             .and_then(|f| family_chain.get(f))
             .and_then(|k| chain_solids.get(k))
-            .map(|v| v.iter().filter(|s| s.void != Some(true) && s.host_block.is_none()).collect())
+            .map(|v| finest_variants(v.iter().filter(|s| s.void != Some(true) && s.host_block.is_none()).collect()))
             .unwrap_or_default()
     };
     // step 2249: columns are never face-based; a column family whose only extrusion carries the
@@ -1430,7 +1460,7 @@ pub fn scene(doc: &Document) -> Scene {
             .get(&sym)
             .and_then(|f| family_chain.get(f))
             .and_then(|k| chain_solids.get(k))
-            .map(|v| v.iter().filter(|s| s.void != Some(true)).collect())
+            .map(|v| finest_variants(v.iter().filter(|s| s.void != Some(true)).collect()))
             .unwrap_or_default()
     };
     let chain_blrev: std::collections::HashMap<(String, usize), (Vec<BlendSolid>, Vec<RevolveSolid>)> =
@@ -1471,7 +1501,7 @@ pub fn scene(doc: &Document) -> Scene {
     let chain_forms = |key: &(String, usize)| -> Vec<[P3; 3]> {
         let mut t = Vec::new();
         if let Some(v) = chain_solids.get(key) {
-            let sol: Vec<&ExtrusionSolid> = v.iter().filter(|s| s.void != Some(true) && s.host_block.is_none()).collect();
+            let sol: Vec<&ExtrusionSolid> = finest_variants(v.iter().filter(|s| s.void != Some(true) && s.host_block.is_none()).collect());
             t.extend(family_triangles(&sol));
         }
         if let Some(v) = chain_sweeps.get(key) {
@@ -1513,6 +1543,70 @@ pub fn scene(doc: &Document) -> Scene {
     let mut plain_count: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
     let linked = doc.sub_component_links();
     let columns: std::collections::HashMap<u64, rvt_model::Column> = doc.columns().into_iter().map(|c| (c.id, c)).collect();
+    // Step 2253: column type sizes. Type values per symbol (with the project chain for parameter
+    // names) and, per family chain, its value sets (the family's types).
+    let mut sym_values: std::collections::HashMap<u64, (rvt_model::ValueSet, (String, usize))> = std::collections::HashMap::new();
+    for (st, ix, tv) in doc.type_values_by_chain() {
+        for (k, v) in tv {
+            sym_values.insert(k, (v, (st.clone(), ix)));
+        }
+    }
+    let chain_sets: std::cell::RefCell<std::collections::HashMap<(String, usize), Vec<rvt_model::ValueSet>>> = Default::default();
+    let chain_names: std::cell::RefCell<std::collections::HashMap<(String, usize), std::collections::HashMap<u64, Option<String>>>> = Default::default();
+    // plan scale (x, y) of a column family's own forms to its type: the structural section width
+    // and depth (-1005502/-1005503) against the family type whose sizes match the forms, else a
+    // single named size ('b', 'Diameter', 'Width') against a square/round form
+    let column_scale = |sym: u64, own: &[[P3; 3]]| -> (f64, f64) {
+        let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+        for t in own {
+            for q in t {
+                for k in 0..2 {
+                    lo[k] = lo[k].min(q[k]);
+                    hi[k] = hi[k].max(q[k]);
+                }
+            }
+        }
+        let (ex, ey) = (hi[0] - lo[0], hi[1] - lo[1]);
+        let Some((vs, pkey)) = sym_values.get(&sym) else { return (1.0, 1.0) };
+        if !(ex > 1e-6 && ey > 1e-6) {
+            return (1.0, 1.0);
+        }
+        let row = |set: &rvt_model::ValueSet, p: i64| set.rows.iter().find(|r| r.param == p).map(|r| r.num).filter(|v| *v > 1e-6);
+        let close = |a: f64, b: f64| (a - b).abs() <= 0.05 * a.max(b);
+        if let (Some(wt), Some(ht)) = (row(vs, -1005502), row(vs, -1005503)) {
+            if let Some(key) = symbol_family.get(&sym).and_then(|f| family_chain.get(f)) {
+                let mut cache = chain_sets.borrow_mut();
+                let sets = cache.entry(key.clone()).or_insert_with(|| doc.value_sets_of(&key.0, key.1));
+                for set in sets.iter() {
+                    if let (Some(wf), Some(hf)) = (row(set, -1005502), row(set, -1005503)) {
+                        if close(ex, wf) && close(ey, hf) {
+                            return (wt / wf, ht / hf);
+                        }
+                        if close(ex, hf) && close(ey, wf) {
+                            return (ht / hf, wt / wf);
+                        }
+                    }
+                }
+            }
+        }
+        if close(ex, ey) {
+            let mut cache = chain_names.borrow_mut();
+            let names = cache.entry(pkey.clone()).or_insert_with(|| doc.parameter_names_of(&pkey.0, pkey.1));
+            let named = vs.rows.iter().find(|r| {
+                r.num > 1e-6 && names.get(&(r.param as u64)).cloned().flatten().is_some_and(|n| matches!(n.as_str(), "b" | "Diameter" | "Width"))
+            });
+            if let Some(r) = named {
+                let sc = r.num / ex.max(ey);
+                if (0.05..=20.0).contains(&sc) {
+                    return (sc, sc);
+                }
+            }
+        }
+        (1.0, 1.0)
+    };
+    let scale_plan = |t: &[[P3; 3]], (sx, sy): (f64, f64)| -> Vec<[P3; 3]> {
+        t.iter().map(|tr| tr.map(|q| [q[0] * sx, q[1] * sy, q[2]])).collect()
+    };
     // step 2230: alternatives per symbol: (shape, local min, local max)
     let mut alt_cache: std::collections::HashMap<u64, std::rc::Rc<Vec<(Vec<[P3; 3]>, P3, P3)>>> = std::collections::HashMap::new();
     // Step 2219: door/window boxes include the swing; clip them to the host wall band instead.
@@ -1560,11 +1654,15 @@ pub fn scene(doc: &Document) -> Scene {
             let (sym, o, m) = (i.symbol?, i.origin?, i.rotation?);
             let zb = doc.level_elevation(c.base_level)? + c.base_offset;
             let zt = doc.level_elevation(c.top_level)? + c.top_offset;
-            let mut local = family_triangles(&column_solids_of(sym));
+            let mut own = family_triangles(&column_solids_of(sym));
             for sw in sweeps_of(sym) {
-                local.extend(sweep_triangles(sw));
+                own.extend(sweep_triangles(sw));
             }
-            local.extend(blrev_of(sym));
+            own.extend(blrev_of(sym));
+            let mut local = scale_plan(&own, column_scale(sym, &own));
+            if let Some(key) = chain_of_symbol(sym) {
+                local.extend(nested_tris(&key, 1, &chain_insts, &chain_of_symbol, &chain_forms));
+            }
             let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
             for t in &local {
                 for q in t {
@@ -1691,6 +1789,13 @@ pub fn scene(doc: &Document) -> Scene {
                     for sw in &swp {
                         all.extend(sweep_triangles(sw));
                     }
+                    // step 2253: a column's own forms take its type size in plan
+                    let (ext_only, no_sweeps, all) = if matches!(i.cat, -2000100 | -2001330) {
+                        let sc = column_scale(sym, &all);
+                        (scale_plan(&ext_only, sc), scale_plan(&no_sweeps, sc), scale_plan(&all, sc))
+                    } else {
+                        (ext_only, no_sweeps, all)
+                    };
                     // step 2246: nested families; candidates with them first (a shared nested component
                     // is a separate instance: linked instances skip these, see `linked`)
                     let nested = chain_of_symbol(sym).map(|key| nested_tris(&key, 1, &chain_insts, &chain_of_symbol, &chain_forms)).unwrap_or_default();
