@@ -665,6 +665,13 @@ pub fn scene(doc: &Document) -> Scene {
             .unwrap_or_default()
     };
     let (mut n_family, mut n_box) = (0usize, 0usize);
+    // Step 2219: door/window boxes include the swing; clip them to the host wall band instead.
+    let wall_band: std::collections::HashMap<i64, (P3, P3, f64)> = doc
+        .walls()
+        .into_iter()
+        .map(|w| (w.id as i64, (w.p0, w.p1, doc.type_thickness(w.wall_type).filter(|t| *t > 0.0).unwrap_or(0.5))))
+        .collect();
+    let host_of: std::collections::HashMap<u64, i64> = doc.hosted().into_iter().filter_map(|h| h.host.map(|x| (h.id, x))).collect();
     for i in insts.iter().filter(|i| i.scale.is_none() && i.origin.is_some()) {
         let Some(e) = doc.element(i.id) else { continue };
         if e.view.is_some_and(|v| v != -1) {
@@ -765,6 +772,48 @@ pub fn scene(doc: &Document) -> Scene {
             }
         }
         n_box += 1;
+        if matches!(i.cat, -2000023 | -2000014) {
+            if let Some(&(p0, p1, t)) = host_of.get(&i.id).and_then(|h| wall_band.get(h)) {
+                if let Some(d) = unit(sub([p1[0], p1[1], 0.0], [p0[0], p0[1], 0.0])) {
+                    let nrm = [-d[1], d[0], 0.0];
+                    // extent of the stored box along the wall; across it the wall thickness
+                    let corners = [[bb[0], bb[1]], [bb[3], bb[1]], [bb[0], bb[4]], [bb[3], bb[4]]];
+                    let along: Vec<f64> = corners.iter().map(|c| (c[0] - p0[0]) * d[0] + (c[1] - p0[1]) * d[1]).collect();
+                    let (a0, a1) = (along.iter().cloned().fold(f64::INFINITY, f64::min), along.iter().cloned().fold(f64::NEG_INFINITY, f64::max));
+                    let o = i.origin.unwrap_or(p0);
+                    // the opening sits where its origin is along the wall; never longer than the box
+                    let at = |a: f64, s: f64| -> P3 { add(add([p0[0], p0[1], 0.0], mul(d, a)), mul(nrm, s)) };
+                    let off = (o[0] - p0[0]) * nrm[0] + (o[1] - p0[1]) * nrm[1];
+                    let off = if off.abs() > t { 0.0 } else { off };
+                    let (s0, s1) = (off - t / 2.0 - 0.02, off + t / 2.0 + 0.02);
+                    let (z0, z1) = (bb[2], bb[5]);
+                    let lift = |p: P3, z: f64| -> P3 { [p[0], p[1], z] };
+                    let bottom = [at(a0, s0), at(a1, s0), at(a1, s1), at(a0, s1)];
+                    batch!(name, color).hexa(
+                        [lift(bottom[0], z0), lift(bottom[1], z0), lift(bottom[2], z0), lift(bottom[3], z0)],
+                        [lift(bottom[0], z1), lift(bottom[1], z1), lift(bottom[2], z1), lift(bottom[3], z1)],
+                    );
+                    continue;
+                }
+            }
+            // not wall-hosted (work plane): a thin slab through the origin along the local X axis
+            if let (Some(o), Some(m)) = (i.origin, i.rotation) {
+                let ax = [m[0], m[3], 0.0];
+                if let Some(d) = unit(ax).filter(|_| m[6].abs() < 1e-6) {
+                    let nrm = [-d[1], d[0], 0.0];
+                    let corners = [[bb[0], bb[1]], [bb[3], bb[1]], [bb[0], bb[4]], [bb[3], bb[4]]];
+                    let along: Vec<f64> = corners.iter().map(|c| (c[0] - o[0]) * d[0] + (c[1] - o[1]) * d[1]).collect();
+                    let (a0, a1) = (along.iter().cloned().fold(f64::INFINITY, f64::min), along.iter().cloned().fold(f64::NEG_INFINITY, f64::max));
+                    let at = |a: f64, s: f64, z: f64| -> P3 { let q = add(add([o[0], o[1], 0.0], mul(d, a)), mul(nrm, s)); [q[0], q[1], z] };
+                    let (z0, z1) = (bb[2], bb[5]);
+                    batch!(name, color).hexa(
+                        [at(a0, -0.125, z0), at(a1, -0.125, z0), at(a1, 0.125, z0), at(a0, 0.125, z0)],
+                        [at(a0, -0.125, z1), at(a1, -0.125, z1), at(a1, 0.125, z1), at(a0, 0.125, z1)],
+                    );
+                    continue;
+                }
+            }
+        }
         batch!(name, color).aabb(bb);
     }
 

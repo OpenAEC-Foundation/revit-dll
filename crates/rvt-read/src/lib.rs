@@ -3,6 +3,7 @@
 mod compound;
 mod curves;
 mod families;
+mod hosted;
 mod instances;
 mod levels;
 mod mep;
@@ -460,6 +461,35 @@ impl Document {
             }
         }
         out
+    }
+
+    /// Hosted family instances per project chain (§30); the 2014 document chain is merged by id.
+    /// Work-plane hosts in linked models are not resolved yet (host = null).
+    pub fn hosted_by_chain(&self) -> Vec<(String, usize, Vec<rvt_model::Hosted>)> {
+        let mut out: Vec<(String, usize, Vec<rvt_model::Hosted>)> =
+            self.project_chains()
+                .map(|(p, ch)| {
+                    let mut h = hosted::hosted(ch, &[]);
+                    if ch.bits == Some(32) {
+                        // step 2163: like instances, records owned by a family are not project content
+                        h.retain(|r| self.owner32.get(&r.id).copied().unwrap_or(-1) == -1);
+                    }
+                    (p.stream.clone(), ch.index, h)
+                })
+                .collect();
+        if let Some(first) = out.first_mut() {
+            for &(pi, ci) in &self.document {
+                let mut extra = hosted::hosted(&self.partitions[pi].chains[ci], &[]);
+                extra.retain(|r| self.owner32.get(&r.id).copied().unwrap_or(-1) == -1);
+                let have: HashSet<u64> = first.2.iter().map(|r| r.id).collect();
+                first.2.extend(extra.into_iter().filter(|r| !have.contains(&r.id)));
+            }
+        }
+        out
+    }
+
+    pub fn hosted(&self) -> Vec<rvt_model::Hosted> {
+        self.hosted_by_chain().into_iter().flat_map(|(_, _, h)| h).collect()
     }
 
     pub fn stairs(&self) -> Vec<Stair> {

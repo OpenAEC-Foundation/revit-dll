@@ -433,3 +433,20 @@ pub struct ExtrusionSolid {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sketches: Option<Vec<u64>>,
 }
+
+/// Hosted family instance (§30, steps 374–377): host element and position along it.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Hosted {
+    pub id: u64,
+    pub level: i64,
+    /// Host element (wall, floor, ...); for a work-plane host the linked model instance, or null.
+    pub host: Option<i64>,
+    /// Position along the host's location line (HostParameter).
+    pub host_param: f64,
+    /// Sill height (steps 476–477).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sill: Option<f64>,
+    /// SketchPlane when the host field is a work plane (step 377).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work_plane: Option<i64>,
+}
