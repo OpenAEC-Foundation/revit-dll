@@ -1519,10 +1519,31 @@ pub fn scene(doc: &Document) -> Scene {
     // they cover the element's stored box (±0.15 ft); otherwise the box itself.
     let symbol_family = doc.symbol_family();
     let family_chain = doc.family_chains();
-    let chain_solids: std::collections::HashMap<(String, usize), Vec<ExtrusionSolid>> =
-        doc.family_solids_by_chain().into_iter().map(|(st, ix, v)| ((st, ix), v)).collect();
-    let chain_sweeps: std::collections::HashMap<(String, usize), Vec<SweepSolid>> =
-        doc.family_sweeps_by_chain().into_iter().map(|(st, ix, v)| ((st, ix), v)).collect();
+    // Step 2258: a family document's group type keeps hidden definition copies of its members (header
+    // slot = the GroupType, as in projects, step 2233); rac_basic 2026 solar panel: an arrayed cell's
+    // copy 4 ft beside the panel. Those forms are not drawn.
+    // (the form lists hold family chains only, so the ids of every chain can be used)
+    let fam_group_defs: std::collections::HashSet<u64> = doc
+        .group_definition_members_by_chain()
+        .into_iter()
+        .flat_map(|(_, _, v)| v.into_iter().map(|m| m.id))
+        .collect();
+    let chain_solids: std::collections::HashMap<(String, usize), Vec<ExtrusionSolid>> = doc
+        .family_solids_by_chain()
+        .into_iter()
+        .map(|(st, ix, mut v)| {
+            v.retain(|s| !fam_group_defs.contains(&s.id));
+            ((st, ix), v)
+        })
+        .collect();
+    let chain_sweeps: std::collections::HashMap<(String, usize), Vec<SweepSolid>> = doc
+        .family_sweeps_by_chain()
+        .into_iter()
+        .map(|(st, ix, mut v)| {
+            v.retain(|s| !fam_group_defs.contains(&s.id));
+            ((st, ix), v)
+        })
+        .collect();
     let solids_of = |sym: u64| -> Vec<&ExtrusionSolid> {
         symbol_family
             .get(&sym)
@@ -1545,8 +1566,15 @@ pub fn scene(doc: &Document) -> Scene {
             .map(|v| finest_variants(v.iter().filter(|s| s.void != Some(true)).collect()))
             .unwrap_or_default()
     };
-    let chain_blrev: std::collections::HashMap<(String, usize), (Vec<BlendSolid>, Vec<RevolveSolid>)> =
-        doc.family_blends_revolves_by_chain().into_iter().map(|(st, ix, b, r)| ((st, ix), (b, r))).collect();
+    let chain_blrev: std::collections::HashMap<(String, usize), (Vec<BlendSolid>, Vec<RevolveSolid>)> = doc
+        .family_blends_revolves_by_chain()
+        .into_iter()
+        .map(|(st, ix, mut b, mut r)| {
+            b.retain(|x| !fam_group_defs.contains(&x.id));
+            r.retain(|x| !fam_group_defs.contains(&x.id));
+            ((st, ix), (b, r))
+        })
+        .collect();
     let blrev_of = |sym: u64| -> Vec<[P3; 3]> {
         let mut t = Vec::new();
         if let Some((bl, rv)) = symbol_family.get(&sym).and_then(|f| family_chain.get(f)).and_then(|k| chain_blrev.get(k)) {
@@ -2149,6 +2177,16 @@ pub fn scene(doc: &Document) -> Scene {
                         // doors and windows: the stored box includes the swing, so it is no fallback
                         let opening = matches!(i.cat, -2000023 | -2000014);
                         (!covers && (inside || opening) && !world.is_empty()).then(|| world.clone())
+                    })
+                    // step 2258: turned about the vertical only (rac_basic solar panels at 37°): the
+                    // box's height is exact, its plan is the turned shape's; when the plan fits, the
+                    // height follows the box (a tilt parameter: Revit 1.27 ft, the family 1.82 ft)
+                    .or_else(|| {
+                        let upright = (m[8] - 1.0).abs() < 1e-6;
+                        let plan = (0..2).all(|k| lo[k] >= bb[k] - 0.5 && hi[k] <= bb[k + 3] + 0.5);
+                        let (hz, bz) = (hi[2] - lo[2], bb[5] - bb[2]);
+                        (!covers && upright && plan && hz > 1e-3 && (0.5..=2.0).contains(&(bz / hz)))
+                            .then(|| world.iter().map(|t| t.map(|q| [q[0], q[1], bb[2] + (q[2] - lo[2]) * bz / hz])).collect())
                     });
                 if covers || fitted.is_some() {
                     let b = batch!(name, color);
