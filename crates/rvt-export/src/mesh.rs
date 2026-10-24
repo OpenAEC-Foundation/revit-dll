@@ -708,6 +708,25 @@ pub fn scene(doc: &Document) -> Scene {
             ext.iter().all(|v| v.is_finite() && *v >= 0.0 && *v < 1e4) && ext.iter().filter(|v| **v * FT > 3.0).count() < 2
         })
         .collect();
+    // step 2236: door/window openings per host wall: (u0, u1, z0, z1) along the wall line
+    let openings: std::collections::HashMap<u64, Vec<(f64, f64, f64, f64)>> = {
+        let wall_line: std::collections::HashMap<u64, (P3, P3)> = walls_all.iter().map(|w| (w.id, (w.p0, w.p1))).collect();
+        let cat: std::collections::HashMap<u64, i32> = insts_all.iter().map(|i| (i.id, i.cat)).collect();
+        let mut m: std::collections::HashMap<u64, Vec<(f64, f64, f64, f64)>> = std::collections::HashMap::new();
+        for h in doc.hosted() {
+            if !matches!(cat.get(&h.id), Some(-2000023 | -2000014)) {
+                continue;
+            }
+            let Some(host) = h.host.map(|x| x as u64) else { continue };
+            let (Some(&(p0, p1)), Some(bb)) = (wall_line.get(&host), doc.element(h.id).and_then(|e| e.bbox)) else { continue };
+            let a = [p0[0], p0[1], 0.0];
+            let Some(d) = unit(sub([p1[0], p1[1], 0.0], a)) else { continue };
+            let us: Vec<f64> = [(bb[0], bb[1]), (bb[3], bb[1]), (bb[0], bb[4]), (bb[3], bb[4])].iter().map(|&(x, y)| dot(sub([x, y, 0.0], a), d)).collect();
+            let (u0, u1) = (us.iter().copied().fold(f64::INFINITY, f64::min), us.iter().copied().fold(f64::NEG_INFINITY, f64::max));
+            m.entry(host).or_default().push((u0, u1, bb[2], bb[5]));
+        }
+        m
+    };
     for w in walls_all.iter().cloned() {
         // A wall without a compound type (curtain wall, storefront) is drawn by its panels and
         // mullions when it has any; drawing it solid hides them (step 2215).
@@ -732,6 +751,67 @@ pub fn scene(doc: &Document) -> Scene {
             None => vec![w.p0, w.p1],
         };
         let b = batch!("Walls", [0.90, 0.88, 0.84]);
+        // step 2236: door/window openings (straight walls): their stored box projected on the wall
+        // line gives the interval along the wall, its z range the height
+        let holes: Vec<(f64, f64, f64, f64)> = if line.len() == 2 { openings.get(&w.id).cloned().unwrap_or_default() } else { vec![] };
+        if !holes.is_empty() {
+            let (a, c) = ([line[0][0], line[0][1], 0.0], [line[1][0], line[1][1], 0.0]);
+            if let Some(d) = unit(sub(c, a)) {
+                let len = norm(sub(c, a));
+                let (z0, z1) = (base, base + height);
+                let hs: Vec<(f64, f64, f64, f64)> = holes
+                    .iter()
+                    .map(|&(u0, u1, h0, h1)| (u0.max(0.0), u1.min(len), h0.max(z0), h1.min(z1)))
+                    .filter(|h| h.1 - h.0 > 1e-3 && h.3 - h.2 > 1e-3)
+                    .collect();
+                let n = mul([-d[1], d[0], 0.0], t / 2.0);
+                let at = |u: f64, z: f64, s: f64| -> P3 { let p = add(a, add(mul(d, u), mul(n, s))); [p[0], p[1], z] };
+                // u breakpoints; per interval the solid z ranges
+                let mut us: Vec<f64> = vec![0.0, len];
+                for h in &hs {
+                    us.push(h.0);
+                    us.push(h.1);
+                }
+                us.sort_by(|x, y| x.total_cmp(y));
+                us.dedup_by(|x, y| (*x - *y).abs() < 1e-6);
+                for win in us.windows(2) {
+                    let (ua, ub) = (win[0], win[1]);
+                    let um = (ua + ub) / 2.0;
+                    let mut cuts: Vec<(f64, f64)> = hs.iter().filter(|h| h.0 <= um && um <= h.1).map(|h| (h.2, h.3)).collect();
+                    cuts.sort_by(|x, y| x.0.total_cmp(&y.0));
+                    let mut solid = Vec::new();
+                    let mut zc = z0;
+                    for (c0, c1) in cuts {
+                        if c0 > zc + 1e-6 {
+                            solid.push((zc, c0));
+                        }
+                        zc = zc.max(c1);
+                    }
+                    if z1 > zc + 1e-6 {
+                        solid.push((zc, z1));
+                    }
+                    for (za, zb) in solid {
+                        // faces on both sides, plus the horizontal faces of this cell
+                        b.quad(at(ua, za, -1.0), at(ub, za, -1.0), at(ub, zb, -1.0), at(ua, zb, -1.0));
+                        b.quad(at(ub, za, 1.0), at(ua, za, 1.0), at(ua, zb, 1.0), at(ub, zb, 1.0));
+                        b.quad(at(ua, zb, -1.0), at(ub, zb, -1.0), at(ub, zb, 1.0), at(ua, zb, 1.0));
+                        b.quad(at(ua, za, 1.0), at(ub, za, 1.0), at(ub, za, -1.0), at(ua, za, -1.0));
+                    }
+                }
+                // wall ends and the jambs of each opening
+                for u in [0.0, len] {
+                    b.quad(at(u, z0, 1.0), at(u, z0, -1.0), at(u, z1, -1.0), at(u, z1, 1.0));
+                }
+                for h in &hs {
+                    for u in [h.0, h.1] {
+                        if u > 1e-6 && u < len - 1e-6 {
+                            b.quad(at(u, h.2, -1.0), at(u, h.2, 1.0), at(u, h.3, 1.0), at(u, h.3, -1.0));
+                        }
+                    }
+                }
+                continue;
+            }
+        }
         for s in line.windows(2) {
             let (a, c) = ([s[0][0], s[0][1], base], [s[1][0], s[1][1], base]);
             let Some(d) = unit(sub(c, a)) else { continue };
@@ -1355,18 +1435,31 @@ pub fn scene(doc: &Document) -> Scene {
                         // step 2218: the stored box of a door also covers its swing (8 ft deep for a
                         // 0.14 ft leaf); stretching up to 2× is plausible. Shrinking is safe down to 0.05×:
                         // a smaller box cannot contain a swing (step 2229: Storax louvres 0.295 → 0.067 ft)
+                        // step 2236: doors and windows: an axis whose box includes the swing (factor
+                        // > 2, a casement window 4.9x deep) keeps the family size; the other axes
+                        // follow the type size, up to 4x (rac_basic: 1.0 x 1.0 m family, 1.5 x 2.7 m
+                        // windows)
+                        let opening = matches!(i.cat, -2000023 | -2000014);
+                        let factor = |k: usize| (ehi[k] - elo[k]) / (shi[k] - slo[k]);
+                        let keep: [bool; 3] = std::array::from_fn(|k| opening && shi[k] - slo[k] > 1e-6 && factor(k) > 2.0 && (k != 2 || factor(k) > 4.0));
                         let plausible = (0..3).all(|k| {
-                            let (se, ee) = (shi[k] - slo[k], ehi[k] - elo[k]);
-                            se < 1e-6 || (ee / se >= 0.05 && ee / se <= 2.0)
+                            let se = shi[k] - slo[k];
+                            se < 1e-6 || keep[k] || (factor(k) >= 0.05 && factor(k) <= if opening { 4.0 } else { 2.0 })
                         });
-                        if !plausible {
+                        if !plausible || keep.iter().all(|x| *x) {
                             return None;
                         }
                         let map = |p: P3| -> P3 {
                             let mut r = [0.0; 3];
                             for k in 0..3 {
                                 let se = shi[k] - slo[k];
-                                r[k] = if se > 1e-6 { elo[k] + (p[k] - slo[k]) * (ehi[k] - elo[k]) / se } else { (elo[k] + ehi[k]) / 2.0 };
+                                r[k] = if keep[k] {
+                                    p[k]
+                                } else if se > 1e-6 {
+                                    elo[k] + (p[k] - slo[k]) * (ehi[k] - elo[k]) / se
+                                } else {
+                                    (elo[k] + ehi[k]) / 2.0
+                                };
                             }
                             place(o, &m, r)
                         };
