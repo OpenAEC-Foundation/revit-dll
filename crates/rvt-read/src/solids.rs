@@ -237,6 +237,10 @@ pub(crate) fn sweep_solids(ch: &Chain, chains: &[Chain]) -> Vec<rvt_model::Sweep
         }
     };
     let mut out = Vec::new();
+    // step 2227: computed once per chain
+    let mut planes_cache: Option<HashMap<i64, [[f64; 3]; 4]>> = None;
+    let mut kid_curves: HashMap<usize, Vec<Curve>> = HashMap::new();
+    let mut kid_of: HashMap<u64, Option<usize>> = HashMap::new();
     for e in ch.elements.iter().filter(|e| e.tag == Some(t)) {
         let bd = ch.body(e);
         let l = bd.len();
@@ -278,7 +282,7 @@ pub(crate) fn sweep_solids(ch: &Chain, chains: &[Chain]) -> Vec<rvt_model::Sweep
         }
         // steps 1012, 1121: profile family (profile sketch = −1), placed at the path start
         if prof.is_empty() && ps == u64::MAX && !path.is_empty() {
-            let loc = profile_family_curves(ch, chains, &byid, e.id, bits32);
+            let loc = profile_family_curves(ch, chains, &byid, e.id, bits32, &mut kid_curves, &mut kid_of);
             let c0 = &path[0];
             let start = match (c0.p0, c0.p1, c0.center, c0.x, c0.y) {
                 (Some(a), Some(b), ..) => Some((a, [b[0] - a[0], b[1] - a[1], b[2] - a[2]])),
@@ -305,7 +309,7 @@ pub(crate) fn sweep_solids(ch: &Chain, chains: &[Chain]) -> Vec<rvt_model::Sweep
                 let mut vv = [tg[1] * nn[2] - tg[2] * nn[1], tg[2] * nn[0] - tg[0] * nn[2], tg[0] * nn[1] - tg[1] * nn[0]];
                 let mut uu = nn;
                 // step 1121: profile plane (normal ∥ tangent) referenced by the sweep body
-                let planes = profile_planes(ch);
+                let planes = planes_cache.get_or_insert_with(|| profile_planes(ch));
                 let sb = ch.body(e);
                 let w = if bits32 { 4 } else { 8 };
                 let pl = (60..sb.len().saturating_sub(w - 1)).find_map(|o| {
@@ -425,7 +429,15 @@ fn profile_planes(ch: &Chain) -> HashMap<i64, [[f64; 3]; 4]> {
 /// Steps 1011–1012, 2166: profile of a sweep with a profile family (FamilySymbol @182, 32-bit
 /// @134): the family's own chain (its key in the family body) and its curve elements, in the
 /// profile family's local XY plane.
-fn profile_family_curves(ch: &Chain, chains: &[Chain], byid: &HashMap<u64, &Element>, sweep: u64, bits32: bool) -> Vec<Curve> {
+fn profile_family_curves(
+    ch: &Chain,
+    chains: &[Chain],
+    byid: &HashMap<u64, &Element>,
+    sweep: u64,
+    bits32: bool,
+    kid_curves: &mut HashMap<usize, Vec<Curve>>,
+    kid_of: &mut HashMap<u64, Option<usize>>,
+) -> Vec<Curve> {
     let Some(e) = byid.get(&sweep) else { return vec![] };
     let b = ch.body(e);
     let off = if bits32 { 134 } else { 182 };
@@ -437,18 +449,30 @@ fn profile_family_curves(ch: &Chain, chains: &[Chain], byid: &HashMap<u64, &Elem
     let Some(pe) = (prof >= 0).then(|| byid.get(&(prof as u64))).flatten() else { return vec![] };
     let sb = ch.body(pe);
     let ft = vtag(ch.version, 1967);
-    let mut fams: Vec<(usize, &Element)> = ch
-        .elements
-        .iter()
-        .filter(|f| f.tag.is_some() && f.tag == ft)
-        .filter_map(|f| find(sb, &pack(f.id as i64)).map(|pos| (pos, f)))
-        .collect();
+    // step 2227: one scan of the symbol body for the first position of every family id
+    let fam_by_id: HashMap<i64, &Element> = ch.elements.iter().filter(|f| f.tag.is_some() && f.tag == ft).map(|f| (f.id as i64, f)).collect();
+    let w = if bits32 { 4 } else { 8 };
+    let mut first: HashMap<i64, usize> = HashMap::new();
+    for o in 0..(sb.len() + 1).saturating_sub(w) {
+        let v = if bits32 { i32_at(sb, o) as i64 } else { i64_at(sb, o) };
+        if fam_by_id.contains_key(&v) {
+            first.entry(v).or_insert(o);
+        }
+    }
+    let mut fams: Vec<(usize, &Element)> = first.into_iter().map(|(v, pos)| (pos, fam_by_id[&v])).collect();
     fams.sort_by_key(|(pos, _)| *pos);
+    let _ = pack;
     for (_, f) in fams {
         let (lo, ln) = f.body;
-        let kid = chains.iter().find(|x| !std::ptr::eq(*x, ch) && x.key.is_some_and(|k| find(&ch.data[lo..lo + ln], &k).is_some()));
-        if let Some(kid) = kid {
-            return crate::curve_elements::curve_elements(kid).into_iter().map(|(_, c)| c).collect();
+        // step 2227: the family -> chain match is cached (many sweeps share a profile family)
+        let kid = *kid_of
+            .entry(f.id)
+            .or_insert_with(|| chains.iter().position(|x| !std::ptr::eq(x, ch) && x.key.is_some_and(|k| find(&ch.data[lo..lo + ln], &k).is_some())));
+        if let Some(ki) = kid {
+            return kid_curves
+                .entry(ki)
+                .or_insert_with(|| crate::curve_elements::curve_elements(&chains[ki]).into_iter().map(|(_, c)| c).collect())
+                .clone();
         }
     }
     vec![]
@@ -672,3 +696,4 @@ pub(crate) fn revolve_solids(ch: &Chain) -> Vec<rvt_model::RevolveSolid> {
     }
     out
 }
+

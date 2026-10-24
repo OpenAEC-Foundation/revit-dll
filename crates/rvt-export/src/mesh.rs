@@ -630,6 +630,9 @@ fn segment_batch(cat: Option<i32>) -> (&'static str, [f32; 3]) {
 
 /// Builds the viewer scene of a document.
 pub fn scene(doc: &Document) -> Scene {
+    // step 2227: the expensive readers once
+    let walls_all = doc.walls();
+    let insts_all: Vec<Instance> = doc.instances();
     let mut batches: BTreeMap<&'static str, Batch> = BTreeMap::new();
     fn get<'a>(m: &'a mut BTreeMap<&'static str, Batch>, name: &'static str, color: [f32; 3]) -> &'a mut Batch {
         m.entry(name).or_insert_with(|| Batch::new(name, color))
@@ -643,8 +646,7 @@ pub fn scene(doc: &Document) -> Scene {
     // Curtain panels and mullions (step 2215): their stored boxes are the real panel/mullion extents
     // (Storax: mullion 28 × 64 × 2000 mm, louvre 60 × 100 × 2000 mm), except in some models where a
     // panel box spans a whole wall; those (two sides > 3 m) are skipped.
-    let curtain_boxes: Vec<[f64; 6]> = doc
-        .instances()
+    let curtain_boxes: Vec<[f64; 6]> = insts_all
         .iter()
         .filter(|i| matches!(i.cat, -2000170 | -2000171))
         .filter_map(|i| doc.element(i.id).and_then(|e| e.bbox))
@@ -653,7 +655,7 @@ pub fn scene(doc: &Document) -> Scene {
             ext.iter().all(|v| v.is_finite() && *v >= 0.0 && *v < 1e4) && ext.iter().filter(|v| **v * FT > 3.0).count() < 2
         })
         .collect();
-    for w in doc.walls() {
+    for w in walls_all.iter().cloned() {
         // A wall without a compound type (curtain wall, storefront) is drawn by its panels and
         // mullions when it has any; drawing it solid hides them (step 2215).
         if doc.type_thickness(w.wall_type).is_none() && !curtain_boxes.is_empty() {
@@ -872,7 +874,7 @@ pub fn scene(doc: &Document) -> Scene {
         }
     }
 
-    let insts: Vec<Instance> = doc.instances();
+    let insts: &[Instance] = &insts_all;
     // Family geometry (§8.11, steps 2214–2216): extrusion solids of the instance's family, used when
     // they cover the element's stored box (±0.15 ft); otherwise the box itself.
     let symbol_family = doc.symbol_family();
@@ -912,10 +914,12 @@ pub fn scene(doc: &Document) -> Scene {
             .unwrap_or_default()
     };
     let (mut n_family, mut n_box) = (0usize, 0usize);
+    let mut box_by_cat: std::collections::BTreeMap<i32, usize> = std::collections::BTreeMap::new();
+    // step 2227: family shapes per symbol are computed once (many instances share a type)
+    let mut shape_cache: std::collections::HashMap<u64, std::rc::Rc<Vec<Vec<[P3; 3]>>>> = std::collections::HashMap::new();
     // Step 2219: door/window boxes include the swing; clip them to the host wall band instead.
-    let wall_band: std::collections::HashMap<i64, (P3, P3, f64)> = doc
-        .walls()
-        .into_iter()
+    let wall_band: std::collections::HashMap<i64, (P3, P3, f64)> = walls_all
+        .iter()
         .map(|w| (w.id as i64, (w.p0, w.p1, doc.type_thickness(w.wall_type).filter(|t| *t > 0.0).unwrap_or(0.5))))
         .collect();
     let host_of: std::collections::HashMap<u64, i64> = doc.hosted().into_iter().filter_map(|h| h.host.map(|x| (h.id, x))).collect();
@@ -939,28 +943,34 @@ pub fn scene(doc: &Document) -> Scene {
         }
         let (name, color) = instance_batch(i.cat);
         if let (Some(sym), Some(o), Some(m)) = (i.symbol, i.origin, i.rotation) {
-            let sol = solids_of(sym);
-            let swp = sweeps_of(sym);
-            let br = blrev_of(sym);
-            if !sol.is_empty() || !swp.is_empty() || !br.is_empty() {
-                // step 2224: all forms first; when a sweep spoils the fit, without sweeps; then
-                // extrusions alone
-                let ext_only = family_triangles(&sol);
-                let mut no_sweeps = ext_only.clone();
-                no_sweeps.extend(br.iter().copied());
-                let mut all = no_sweeps.clone();
-                for sw in &swp {
-                    all.extend(sweep_triangles(sw));
-                }
-                let mut candidates: Vec<Vec<[P3; 3]>> = Vec::new();
-                for c in [all, no_sweeps, ext_only] {
-                    if !c.is_empty() && !candidates.iter().any(|x| x.len() == c.len()) {
-                        candidates.push(c);
+            let candidates = shape_cache
+                .entry(sym)
+                .or_insert_with(|| {
+                    let sol = solids_of(sym);
+                    let swp = sweeps_of(sym);
+                    let br = blrev_of(sym);
+                    // step 2224: all forms first; when a sweep spoils the fit, without sweeps; then
+                    // extrusions alone
+                    let ext_only = family_triangles(&sol);
+                    let mut no_sweeps = ext_only.clone();
+                    no_sweeps.extend(br.iter().copied());
+                    let mut all = no_sweeps.clone();
+                    for sw in &swp {
+                        all.extend(sweep_triangles(sw));
                     }
-                }
-                for local in candidates {
+                    let mut c: Vec<Vec<[P3; 3]>> = Vec::new();
+                    for x in [all, no_sweeps, ext_only] {
+                        if !x.is_empty() && !c.iter().any(|y| y.len() == x.len()) {
+                            c.push(x);
+                        }
+                    }
+                    std::rc::Rc::new(c)
+                })
+                .clone();
+            if !candidates.is_empty() {
+                for local in candidates.iter() {
                 if std::env::var("RVT_MESH_DEBUG").ok().and_then(|v| v.parse::<u64>().ok()) == Some(i.id) {
-                    eprintln!("debug {}: {} solids, {} local triangles, bbox {:?}", i.id, sol.len(), local.len(), bb);
+                    eprintln!("debug {}: {} local triangles, bbox {:?}", i.id, local.len(), bb);
                 }
                 let bounds = |tris: &[[P3; 3]]| {
                     let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
@@ -1037,6 +1047,7 @@ pub fn scene(doc: &Document) -> Scene {
             }
         }
         n_box += 1;
+        *box_by_cat.entry(i.cat).or_default() += 1;
         if matches!(i.cat, -2000023 | -2000014) {
             if let Some(&(p0, p1, t)) = host_of.get(&i.id).and_then(|h| wall_band.get(h)) {
                 if let Some(d) = unit(sub([p1[0], p1[1], 0.0], [p0[0], p0[1], 0.0])) {
@@ -1084,6 +1095,9 @@ pub fn scene(doc: &Document) -> Scene {
 
     if std::env::var_os("RVT_MESH_STATS").is_some() {
         eprintln!("instances: {n_family} with family geometry, {n_box} as box");
+        let mut v: Vec<_> = box_by_cat.iter().collect();
+        v.sort_by(|a, b| b.1.cmp(a.1));
+        eprintln!("as box by category: {:?}", v.iter().take(8).map(|(c, n)| format!("{c}:{n}")).collect::<Vec<_>>());
     }
     let mut out = Scene { batches: batches.into_values().filter(|b| !b.indices.is_empty()).collect(), ..Default::default() };
     let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);

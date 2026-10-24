@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use rvt_core::{vtag, Partition};
 
-use crate::util::{find, i32_at};
+use crate::util::{i32_at, i64_at};
 
 pub(crate) const TAG_FAMILY: u16 = 1967;
 const TAG_SYMBOL: u16 = 2022;
@@ -23,6 +23,7 @@ pub(crate) fn family_chains(parts: &[Partition]) -> BTreeMap<u64, (usize, usize)
             }
         }
     }
+    let prefixes: HashSet<u32> = keys.keys().map(|k| u32::from_le_bytes([k[0], k[1], k[2], k[3]])).collect();
     // (order key, family) candidates
     let mut best: HashMap<u64, ((usize, usize, usize), (usize, usize))> = HashMap::new();
     for (pi, p) in parts.iter().enumerate() {
@@ -34,13 +35,10 @@ pub(crate) fn family_chains(parts: &[Partition]) -> BTreeMap<u64, (usize, usize)
             continue;
         }
         fams.sort();
+        // family bodies do not overlap: the family containing i by binary search on the sorted starts
         let fam_at = |i: usize| -> Option<u64> {
-            // reference: the first family in element order whose body contains i
-            ch.elements
-                .iter()
-                .filter(|e| e.tag.is_some() && e.tag == ft)
-                .find(|e| e.body.0 <= i && i < e.body.0 + e.body.1)
-                .map(|e| e.id)
+            let k = fams.partition_point(|f| f.0 <= i);
+            (k > 0 && i < fams[k - 1].1).then(|| fams[k - 1].2)
         };
         let (lo, hi) = (fams[0].0, fams.iter().map(|f| f.1).max().unwrap_or(0));
         let data = &ch.data;
@@ -50,6 +48,10 @@ pub(crate) fn family_chains(parts: &[Partition]) -> BTreeMap<u64, (usize, usize)
             continue;
         }
         for i in lo..hi.min(data.len()).saturating_sub(15) {
+            // step 2227: cheap 4-byte prefix check before the full key lookup
+            if !prefixes.contains(&u32::from_le_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]])) {
+                continue;
+            }
             let k: [u8; 16] = data[i..i + 16].try_into().expect("16 bytes");
             let Some(owners) = keys.get(&k) else { continue };
             if done.contains(&k) {
@@ -84,6 +86,10 @@ pub(crate) fn symbol_family(parts: &[Partition]) -> HashMap<u64, u64> {
         }
     }
     let fset: HashSet<i64> = fams.iter().map(|&f| f as i64).collect();
+    let mut fam_index: HashMap<i64, usize> = HashMap::new();
+    for (k, &f) in fams.iter().enumerate() {
+        fam_index.entry(f as i64).or_insert(k);
+    }
     let mut out = HashMap::new();
     for p in parts {
         let Some(ch) = p.chains.first().filter(|c| c.bits.is_some()) else { continue };
@@ -91,17 +97,15 @@ pub(crate) fn symbol_family(parts: &[Partition]) -> HashMap<u64, u64> {
         let bits32 = ch.bits == Some(32);
         for e in ch.elements.iter().filter(|e| e.tag.is_some() && e.tag == st) {
             let b = ch.body(e);
+            // step 2227: one scan of the body (same result as testing every family in file order)
             let fid = if bits32 {
-                let first = fams.iter().copied().find(|&f| find(b, &(f as i32).to_le_bytes()).is_some());
-                if first.is_none() {
-                    None
-                } else {
-                    let hits: Vec<i64> =
-                        (0..b.len().saturating_sub(3)).map(|o| i32_at(b, o) as i64).filter(|v| fset.contains(v)).collect();
-                    hits.iter().copied().find(|&v| v >= 0x10000).or(hits.first().copied()).map(|v| v as u64).or(first)
-                }
+                // a family found anywhere implies a hit at that offset; earliest i32 id >= 0x10000, else the earliest
+                let hits: Vec<i64> =
+                    (0..b.len().saturating_sub(3)).map(|o| i32_at(b, o) as i64).filter(|v| fset.contains(v)).collect();
+                hits.iter().copied().find(|&v| v >= 0x10000).or(hits.first().copied()).map(|v| v as u64)
             } else {
-                fams.iter().copied().find(|&f| find(b, &(f as i64).to_le_bytes()).is_some())
+                // the family that comes first in file order among those whose id occurs in the body
+                (0..b.len().saturating_sub(7)).filter_map(|o| fam_index.get(&i64_at(b, o)).copied()).min().map(|k| fams[k])
             };
             if let Some(f) = fid {
                 out.insert(e.id, f);
