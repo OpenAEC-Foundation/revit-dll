@@ -197,7 +197,12 @@ fn point_in(pt: [f64; 2], l: &[[f64; 2]]) -> bool {
 /// Polyline of a curve (model coordinates).
 fn sample(c: &Curve) -> Vec<P3> {
     let arc_pts = |center: P3, rx: f64, ry: f64, x: P3, y: P3, t0: f64, t1: f64| {
-        let n = (((t1 - t0).abs() / (PI / 24.0)).ceil() as usize).clamp(2, 96);
+        // step 2230: step angle from a chord error of at most ~1 mm, never finer than 7.5° and
+        // at least one step per 90° (small profile fillets no longer get 7.5° steps)
+        let r = rx.abs().max(ry.abs());
+        let tol = 0.003;
+        let step = if r > tol { (2.0 * (1.0 - tol / r).acos()).clamp(PI / 24.0, PI / 2.0) } else { PI / 2.0 };
+        let n = (((t1 - t0).abs() / step).ceil() as usize).clamp(1, 96);
         (0..=n)
             .map(|k| {
                 let t = t0 + (t1 - t0) * k as f64 / n as f64;
@@ -940,6 +945,8 @@ pub fn scene(doc: &Document) -> Scene {
     let mut box_by_cat: std::collections::BTreeMap<i32, usize> = std::collections::BTreeMap::new();
     // step 2227: family shapes per symbol are computed once (many instances share a type)
     let mut shape_cache: std::collections::HashMap<u64, std::rc::Rc<Vec<Vec<[P3; 3]>>>> = std::collections::HashMap::new();
+    // step 2230: alternatives per symbol: (shape, local min, local max)
+    let mut alt_cache: std::collections::HashMap<u64, std::rc::Rc<Vec<(Vec<[P3; 3]>, P3, P3)>>> = std::collections::HashMap::new();
     // Step 2219: door/window boxes include the swing; clip them to the host wall band instead.
     let wall_band: std::collections::HashMap<i64, (P3, P3, f64)> = walls_all
         .iter()
@@ -990,6 +997,68 @@ pub fn scene(doc: &Document) -> Scene {
                     std::rc::Rc::new(c)
                 })
                 .clone();
+            // step 2230: a family with several sweeps along the same path (Storax louvres: 22
+            // profile variants, the type switches one on) has alternatives; the one whose placed
+            // sizes are closest to the element box goes first.
+            let alts = alt_cache
+                .entry(sym)
+                .or_insert_with(|| {
+                    let swp = sweeps_of(sym);
+                    let key = |sw: &SweepSolid| -> Vec<i64> {
+                        sw.path.iter().flat_map(|c| c.p0.into_iter().chain(c.p1)).flatten().map(|v| (v * 1e3).round() as i64).collect()
+                    };
+                    let mut groups: std::collections::BTreeMap<Vec<i64>, Vec<usize>> = std::collections::BTreeMap::new();
+                    for (k, sw) in swp.iter().enumerate() {
+                        groups.entry(key(sw)).or_default().push(k);
+                    }
+                    let Some(group) = groups.into_values().filter(|g| g.len() >= 3).max_by_key(|g| g.len()) else {
+                        return std::rc::Rc::new(vec![]);
+                    };
+                    let mut base = family_triangles(&solids_of(sym));
+                    base.extend(blrev_of(sym));
+                    for (_, sw) in swp.iter().enumerate().filter(|(k, _)| !group.contains(k)) {
+                        base.extend(sweep_triangles(sw));
+                    }
+                    let out = group
+                        .iter()
+                        .map(|&k| {
+                            let mut t = base.clone();
+                            t.extend(sweep_triangles(swp[k]));
+                            let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+                            for tr in &t {
+                                for q in tr {
+                                    for j in 0..3 {
+                                        lo[j] = lo[j].min(q[j]);
+                                        hi[j] = hi[j].max(q[j]);
+                                    }
+                                }
+                            }
+                            (t, lo, hi)
+                        })
+                        .filter(|a| !a.0.is_empty())
+                        .collect();
+                    std::rc::Rc::new(out)
+                })
+                .clone();
+            let best_alt = alts
+                .iter()
+                .map(|(t, lo, hi)| {
+                    // placed bounds of the local box corners
+                    let (mut wl, mut wh) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+                    for c in 0..8 {
+                        let q = place(o, &m, [if c & 1 == 0 { lo[0] } else { hi[0] }, if c & 2 == 0 { lo[1] } else { hi[1] }, if c & 4 == 0 { lo[2] } else { hi[2] }]);
+                        for j in 0..3 {
+                            wl[j] = wl[j].min(q[j]);
+                            wh[j] = wh[j].max(q[j]);
+                        }
+                    }
+                    // size ratio per axis (the fit below scales parametric lengths)
+                    let err: f64 = (0..3).map(|j| ((wh[j] - wl[j] + 1e-3) / (ext[j] + 1e-3)).ln().abs()).sum();
+                    (err, t)
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|(_, t)| t);
+            let candidates: Vec<&Vec<[P3; 3]>> = best_alt.into_iter().chain(candidates.iter()).collect();
             if !candidates.is_empty() {
                 for local in candidates.iter() {
                 if std::env::var("RVT_MESH_DEBUG").ok().and_then(|v| v.parse::<u64>().ok()) == Some(i.id) {
