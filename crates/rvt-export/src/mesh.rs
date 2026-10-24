@@ -1002,6 +1002,63 @@ pub fn scene(doc: &Document) -> Scene {
             if let Some(r) = run {
                 k = ((r.base_elevation - zb) / st.riser).round().max(0.0) as usize;
             }
+            // step 2242: a sketched run with riser lines (winders included): a tread between each
+            // pair of consecutive riser lines, ordered along the walk path, left/right by the walking
+            // direction (rac_basic U-stair 665557: 17 lines, 16 risers)
+            let rlines: Vec<(P3, P3)> = st
+                .run_geometry
+                .get(&rid.to_string())
+                .and_then(|g| g.lines.get("riser"))
+                .map(|cs| cs.iter().filter_map(|c| Some(([c.p0?[0], c.p0?[1], 0.0], [c.p1?[0], c.p1?[1], 0.0]))).collect())
+                .unwrap_or_default();
+            if rlines.len() >= 2 && path.len() >= 2 {
+                let flat: Vec<P3> = path.iter().map(|q| [q[0], q[1], 0.0]).collect();
+                // (arc length, tangent) of the path point nearest to m
+                let locate = |m: P3| -> (f64, P3) {
+                    let (mut best, mut acc) = ((f64::INFINITY, 0.0, [1.0, 0.0, 0.0]), 0.0);
+                    for sg in flat.windows(2) {
+                        let d = sub(sg[1], sg[0]);
+                        let l = norm(d);
+                        if l < 1e-9 {
+                            continue;
+                        }
+                        let u = mul(d, 1.0 / l);
+                        let t = dot(sub(m, sg[0]), u).clamp(0.0, l);
+                        let dist = norm(sub(m, add(sg[0], mul(u, t))));
+                        if dist < best.0 {
+                            best = (dist, acc + t, u);
+                        }
+                        acc += l;
+                    }
+                    (best.1, best.2)
+                };
+                let mut lines: Vec<(f64, P3, P3)> = rlines
+                    .iter()
+                    .map(|&(a, c)| {
+                        let (s, u) = locate(mul(add(a, c), 0.5));
+                        // left endpoint first
+                        let left = cross(u, sub(a, c))[2] > 0.0;
+                        if left { (s, a, c) } else { (s, c, a) }
+                    })
+                    .collect();
+                lines.sort_by(|x, y| x.0.total_cmp(&y.0));
+                for w in lines.windows(2) {
+                    if k as i64 >= st.risers {
+                        break;
+                    }
+                    let z0 = zb + st.riser * k as f64;
+                    let mut q = [w[0].1, w[0].2, w[1].2, w[1].1];
+                    // counter-clockwise from above
+                    let area2: f64 = (0..4).map(|i| q[i][0] * q[(i + 1) % 4][1] - q[(i + 1) % 4][0] * q[i][1]).sum();
+                    if area2 < 0.0 {
+                        q.reverse();
+                    }
+                    let bot = q.map(|v| [v[0], v[1], z0]);
+                    b.hexa(bot, bot.map(|v| [v[0], v[1], z0 + st.riser]));
+                    k += 1;
+                }
+                continue;
+            }
             let len = polyline_len(&path);
             let n = ((len / st.tread).round() as usize).max(1);
             // points at equal steps along the path
