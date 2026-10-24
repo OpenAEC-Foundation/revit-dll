@@ -508,6 +508,21 @@ impl Document {
         out
     }
 
+    /// Blends and revolutions of every family (non-project) chain (§8.13/§8.14).
+    pub fn family_blends_revolves_by_chain(&self) -> Vec<(String, usize, Vec<rvt_model::BlendSolid>, Vec<rvt_model::RevolveSolid>)> {
+        let proj: HashSet<(usize, usize)> = self.project.iter().chain(self.document.iter()).copied().collect();
+        let mut out = Vec::new();
+        for (pi, p) in self.partitions.iter().enumerate() {
+            for (ci, ch) in p.chains.iter().enumerate() {
+                if ch.bits.is_none() || proj.contains(&(pi, ci)) {
+                    continue;
+                }
+                out.push((p.stream.clone(), ch.index, solids::blend_solids(ch), solids::revolve_solids(ch)));
+            }
+        }
+        out
+    }
+
     pub fn stairs(&self) -> Vec<Stair> {
         self.stairs_by_chain().into_iter().flat_map(|(_, _, s)| s).collect()
     }

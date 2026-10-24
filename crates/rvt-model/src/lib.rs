@@ -488,3 +488,29 @@ pub struct SweepSolid {
 fn is_zero(v: &u64) -> bool {
     *v == 0
 }
+
+/// Blend of a family document (§8.13): loft between the bottom and top profile, both in the
+/// bottom sketch plane, moved by bottom_offset·N and top_offset·N.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct BlendSolid {
+    pub id: u64,
+    pub void: Option<bool>,
+    pub bottom: Vec<Curve>,
+    pub top: Vec<Curve>,
+    #[serde(rename = "N")]
+    pub n: [f64; 3],
+    pub bottom_offset: f64,
+    pub top_offset: f64,
+}
+
+/// Revolution of a family document (§8.14): profile rotated about the axis A→B from start to end
+/// angle (radians).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct RevolveSolid {
+    pub id: u64,
+    pub void: Option<bool>,
+    pub axis: [[f64; 3]; 2],
+    pub profile: Vec<Curve>,
+    pub start_angle: f64,
+    pub end_angle: f64,
+}

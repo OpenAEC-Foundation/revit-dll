@@ -115,6 +115,15 @@ fn run(args: &[String]) -> Result<Value, String> {
                 doc.stairs_by_chain().into_iter().map(|(s, i, v)| json!({"stream": s, "index": i, "stairs": v})).collect();
             Ok(json!({"chains": chains}))
         }
+        "blends" | "revolves" => {
+            let doc = rvt_read::Document::open(path).map_err(err)?;
+            let chains: Vec<Value> = doc
+                .family_blends_revolves_by_chain()
+                .into_iter()
+                .map(|(s, i, b, r)| if cmd == "blends" { json!({"stream": s, "index": i, "blends": b}) } else { json!({"stream": s, "index": i, "revolves": r}) })
+                .collect();
+            Ok(json!({"chains": chains}))
+        }
         "sweeps" => {
             let doc = rvt_read::Document::open(path).map_err(err)?;
             let chains: Vec<Value> =

@@ -476,3 +476,199 @@ fn place_curves(curves: &[Curve], p: [f64; 3], u: [f64; 3], v: [f64; 3]) -> Vec<
 fn v3(b: &[u8], o: usize) -> [f64; 3] {
     [f64_at(b, o), f64_at(b, o + 8), f64_at(b, o + 16)]
 }
+
+const TAG_REVOLUTION: u16 = 3760;
+const TAG_BLEND: u16 = 626;
+
+/// Value pair `f64 | id BIP a | f64 | id BIP b` (64-bit i64 BIPs, 32-bit i32) anywhere in the body:
+/// returns (first f64, second f64) of the first match (§8).
+fn bip_pair(bd: &[u8], bits32: bool, a: i64, b: i64) -> Option<(f64, f64)> {
+    let l = bd.len();
+    if bits32 {
+        (0..l.saturating_sub(24)).find(|&o| i32_at(bd, o + 8) as i64 == a && i32_at(bd, o + 20) as i64 == b).map(|o| (f64_at(bd, o), f64_at(bd, o + 12)))
+    } else {
+        (0..l.saturating_sub(36)).find(|&o| i64_at(bd, o + 8) == a && i64_at(bd, o + 24) == b).map(|o| (f64_at(bd, o), f64_at(bd, o + 16)))
+    }
+}
+
+fn curves_of(ch: &Chain, byid: &HashMap<u64, &Element>, cur: &HashSet<u64>, sid: u64, bits32: bool) -> Vec<Curve> {
+    byid.get(&sid).map(|e| curves_in(bits32, &ch.data, cur, e.body.0, e.body.0 + e.body.1)).unwrap_or_default()
+}
+
+/// §8.13 (steps 499–500, 2165): blends; the first two sketch ids after the void byte (64-bit u64
+/// from @152, 32-bit i32 from @108), offsets from the BIP pair −1001805/−1001804.
+pub(crate) fn blend_solids(ch: &Chain) -> Vec<rvt_model::BlendSolid> {
+    let Some(t) = mapped_tag(ch.version, TAG_BLEND) else { return vec![] };
+    let bits32 = ch.bits == Some(32);
+    if !bits32 && ch.bits != Some(64) {
+        return vec![];
+    }
+    let ct = vtag(ch.version, TAG_CURVE);
+    let cur: HashSet<u64> = ch.elements.iter().filter(|e| e.tag.is_some() && e.tag == ct).map(|e| e.id).collect();
+    let byid: HashMap<u64, &Element> = ch.elements.iter().map(|e| (e.id, e)).collect();
+    let st = vtag(ch.version, TAG_SKETCH);
+    let is_sketch = |v: u64| byid.get(&v).is_some_and(|e| e.tag.is_some() && e.tag == st);
+    let mut out = Vec::new();
+    for e in ch.elements.iter().filter(|e| e.tag == Some(t)) {
+        let bd = ch.body(e);
+        let l = bd.len();
+        let void = if bits32 { (l > 108).then(|| bd[107] == 1) } else { (l > 152).then(|| bd[151] == 1) };
+        let sk: Vec<u64> = if bits32 {
+            (108..l.saturating_sub(4).min(300)).map(|o| i32_at(bd, o) as i64 as u64).filter(|v| is_sketch(*v)).collect()
+        } else {
+            (152..l.saturating_sub(8).min(400)).map(|o| u64_at(bd, o)).filter(|v| is_sketch(*v)).collect()
+        };
+        if sk.len() < 2 {
+            continue;
+        }
+        let (bs, ts) = (sk[0], sk[1..].iter().copied().find(|x| *x != sk[0]));
+        let Some(ts) = ts else { continue };
+        let (top_off, bot_off) = bip_pair(bd, bits32, -1001805, -1001804).unwrap_or((0.0, 0.0));
+        let (bot, top) = (curves_of(ch, &byid, &cur, bs, bits32), curves_of(ch, &byid, &cur, ts, bits32));
+        let pts: Vec<[f64; 3]> = bot
+            .iter()
+            .flat_map(|c| match (c.p0, c.p1, c.center) {
+                (Some(a), Some(b), _) => vec![a, b],
+                (_, _, Some(cc)) => vec![cc],
+                _ => vec![],
+            })
+            .collect();
+        if bot.is_empty() || top.is_empty() || pts.is_empty() {
+            continue;
+        }
+        let Some([_, _, _, n]) = byid.get(&bs).and_then(|sk| sketch_frame(ch.body(sk), &pts)) else { continue };
+        out.push(rvt_model::BlendSolid { id: e.id, void, bottom: bot, top, n, bottom_offset: bot_off, top_offset: top_off });
+    }
+    out
+}
+
+/// End points of a curve (lines, arcs, ellipses).
+fn curve_ends(c: &Curve) -> Vec<[f64; 3]> {
+    if let (Some(a), Some(b)) = (c.p0, c.p1) {
+        return vec![a, b];
+    }
+    let (Some(cc), Some(x), Some(y), Some(t0), Some(t1)) = (c.center, c.x, c.y, c.t0, c.t1) else { return vec![] };
+    let (rx, ry) = match c.kind {
+        "arc" => (c.r.unwrap_or(0.0), c.r.unwrap_or(0.0)),
+        "ellipse" => (c.rx.unwrap_or(0.0), c.ry.unwrap_or(0.0)),
+        _ => return vec![],
+    };
+    [t0, t1].iter().map(|t| [0, 1, 2].map(|k| cc[k] + rx * t.cos() * x[k] + ry * t.sin() * y[k])).collect()
+}
+
+/// Python `tuple(round(v, 5) for v in p)` as a hashable key (−0.0 equals 0.0).
+fn rkey(p: &[f64; 3]) -> [u64; 3] {
+    p.map(|v| {
+        let r: f64 = format!("{v:.5}").parse().unwrap_or(v);
+        if r == 0.0 { 0u64 } else { r.to_bits() }
+    })
+}
+
+/// §8.14 (steps 506–509, 602–603, 606, 2165): revolutions. Axis = the line whose two ends are free
+/// (node degree 1); else the only line whose removal leaves only even degrees; else the one
+/// doubled profile edge (the copy with the larger id). Axis direction so that (n × (c − A))·N < 0.
+pub(crate) fn revolve_solids(ch: &Chain) -> Vec<rvt_model::RevolveSolid> {
+    let Some(t) = mapped_tag(ch.version, TAG_REVOLUTION) else { return vec![] };
+    let bits32 = ch.bits == Some(32);
+    if !bits32 && ch.bits != Some(64) {
+        return vec![];
+    }
+    let ct = vtag(ch.version, TAG_CURVE);
+    let cur: HashSet<u64> = ch.elements.iter().filter(|e| e.tag.is_some() && e.tag == ct).map(|e| e.id).collect();
+    let byid: HashMap<u64, &Element> = ch.elements.iter().map(|e| (e.id, e)).collect();
+    let mut out = Vec::new();
+    for e in ch.elements.iter().filter(|e| e.tag == Some(t)) {
+        let bd = ch.body(e);
+        let l = bd.len();
+        let (void, sketch) = if bits32 {
+            ((l > 108).then(|| bd[107] == 1), (l >= 112).then(|| i32_at(bd, 108) as i64 as u64))
+        } else {
+            ((l > 152).then(|| bd[151] == 1), (l >= 160).then(|| u64_at(bd, 152)))
+        };
+        let Some(sketch) = sketch.filter(|s| byid.contains_key(s)) else { continue };
+        let (end_a, start_a) = bip_pair(bd, bits32, -1001803, -1001802).unwrap_or((2.0 * PI, 0.0));
+        let cs = curves_of(ch, &byid, &cur, sketch, bits32);
+        let mut deg: HashMap<[u64; 3], usize> = HashMap::new();
+        for c in &cs {
+            for p in curve_ends(c) {
+                *deg.entry(rkey(&p)).or_default() += 1;
+            }
+        }
+        let is_line = |c: &Curve| c.p0.is_some() && c.p1.is_some();
+        let mut axes: Vec<usize> = (0..cs.len())
+            .filter(|&i| is_line(&cs[i]) && [cs[i].p0.unwrap(), cs[i].p1.unwrap()].iter().all(|p| deg.get(&rkey(p)) == Some(&1)))
+            .collect();
+        if axes.len() != 1 {
+            axes = (0..cs.len())
+                .filter(|&i| {
+                    if !is_line(&cs[i]) {
+                        return false;
+                    }
+                    let mut d2: HashMap<[u64; 3], usize> = HashMap::new();
+                    for (j, c) in cs.iter().enumerate() {
+                        if j != i {
+                            for p in curve_ends(c) {
+                                *d2.entry(rkey(&p)).or_default() += 1;
+                            }
+                        }
+                    }
+                    d2.values().all(|n| n % 2 == 0)
+                })
+                .collect();
+        }
+        if axes.len() != 1 {
+            let mut dup: Vec<([[u64; 3]; 2], Vec<usize>)> = Vec::new();
+            for (i, c) in cs.iter().enumerate() {
+                if let (Some(a), Some(b)) = (c.p0, c.p1) {
+                    let mut k = [rkey(&a), rkey(&b)];
+                    k.sort();
+                    match dup.iter_mut().find(|(kk, _)| *kk == k) {
+                        Some((_, v)) => v.push(i),
+                        None => dup.push((k, vec![i])),
+                    }
+                }
+            }
+            let pairs: Vec<&Vec<usize>> = dup.iter().map(|(_, v)| v).filter(|v| v.len() == 2).collect();
+            if pairs.len() == 1 {
+                // max by id (first of equal ids, like Python max)
+                let v = pairs[0];
+                let best = if cs[v[1]].id > cs[v[0]].id { v[1] } else { v[0] };
+                axes = vec![best];
+            }
+        }
+        if axes.len() != 1 {
+            continue;
+        }
+        let ai = axes[0];
+        let (mut a, mut b) = (cs[ai].p0.unwrap(), cs[ai].p1.unwrap());
+        let mut pts: Vec<[f64; 3]> = cs.iter().enumerate().filter(|(i, _)| *i != ai).flat_map(|(_, c)| curve_ends(c)).collect();
+        for (i, c) in cs.iter().enumerate() {
+            if i != ai && matches!(c.kind, "arc" | "ellipse") {
+                if let (Some(t0), Some(t1)) = (c.t0, c.t1) {
+                    let mut m = c.clone();
+                    m.t0 = Some((t0 + t1) / 2.0);
+                    if let Some(p) = curve_ends(&m).first() {
+                        pts.push(*p);
+                    }
+                }
+            }
+        }
+        if !pts.is_empty() {
+            let mut all = pts.clone();
+            all.push(a);
+            all.push(b);
+            if let Some([_, _, _, nn]) = sketch_frame(ch.body(byid[&sketch]), &all) {
+                let n_ = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                let cnt = pts.len() as f64;
+                let c_ = [0, 1, 2].map(|k| pts.iter().map(|q| q[k]).sum::<f64>() / cnt - a[k]);
+                let x_ = [n_[1] * c_[2] - n_[2] * c_[1], n_[2] * c_[0] - n_[0] * c_[2], n_[0] * c_[1] - n_[1] * c_[0]];
+                if x_[0] * nn[0] + x_[1] * nn[1] + x_[2] * nn[2] > 0.0 {
+                    std::mem::swap(&mut a, &mut b);
+                }
+            }
+        }
+        let profile: Vec<Curve> = cs.iter().enumerate().filter(|(i, _)| *i != ai).map(|(_, c)| c.clone()).collect();
+        out.push(rvt_model::RevolveSolid { id: e.id, void, axis: [a, b], profile, start_angle: start_a, end_angle: end_a });
+    }
+    out
+}
