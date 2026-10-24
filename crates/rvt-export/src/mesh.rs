@@ -357,6 +357,77 @@ fn flipped_rotation(i: &Instance) -> Option<[f64; 9]> {
     Some(m)
 }
 
+/// Step 2261: the oriented box behind a stored (world, axis-aligned) box. A box of local half sizes
+/// e turned by m has world half sizes h = |m|·e; e ≥ 0 is the non-negative least-squares solution
+/// over the subsets of free axes. None when m is a signed permutation (the stored box is exact).
+/// snowdon arch 2025: adaptive canopy struts (0.7 m² in Revit) drew as 90 m² world boxes.
+fn oriented_box(bb: &[f64; 6], m: &[f64; 9]) -> Option<([P3; 4], [P3; 4])> {
+    if m.iter().all(|v| v.abs() < 1e-6 || (v.abs() - 1.0).abs() < 1e-6) {
+        return None;
+    }
+    let a: [[f64; 3]; 3] = std::array::from_fn(|j| std::array::from_fn(|k| m[3 * j + k].abs()));
+    let h = [(bb[3] - bb[0]) / 2.0, (bb[4] - bb[1]) / 2.0, (bb[5] - bb[2]) / 2.0];
+    let mut best: Option<(f64, [f64; 3])> = None;
+    for mask in 1u8..8 {
+        let free: Vec<usize> = (0..3).filter(|k| mask & (1 << k) != 0).collect();
+        // normal equations on the free columns
+        let n = free.len();
+        let mut ata = vec![vec![0.0; n]; n];
+        let mut atb = vec![0.0; n];
+        for (r, &kr) in free.iter().enumerate() {
+            for (c, &kc) in free.iter().enumerate() {
+                ata[r][c] = (0..3).map(|j| a[j][kr] * a[j][kc]).sum();
+            }
+            atb[r] = (0..3).map(|j| a[j][kr] * h[j]).sum();
+        }
+        // Gaussian elimination
+        let mut ok = true;
+        for c in 0..n {
+            let piv = (c..n).max_by(|x, y| ata[*x][c].abs().total_cmp(&ata[*y][c].abs())).unwrap();
+            if ata[piv][c].abs() < 1e-12 {
+                ok = false;
+                break;
+            }
+            ata.swap(c, piv);
+            atb.swap(c, piv);
+            for r in 0..n {
+                if r != c {
+                    let f = ata[r][c] / ata[c][c];
+                    for k in c..n {
+                        ata[r][k] -= f * ata[c][k];
+                    }
+                    atb[r] -= f * atb[c];
+                }
+            }
+        }
+        if !ok {
+            continue;
+        }
+        let mut e = [0.0; 3];
+        for (r, &k) in free.iter().enumerate() {
+            e[k] = atb[r] / ata[r][r];
+        }
+        if e.iter().any(|v| *v < -1e-9) {
+            continue;
+        }
+        let res: f64 = (0..3).map(|j| ((0..3).map(|k| a[j][k] * e[k]).sum::<f64>() - h[j]).powi(2)).sum();
+        if best.map_or(true, |(r, _)| res < r - 1e-12) {
+            best = Some((res, e));
+        }
+    }
+    let (_, e) = best?;
+    // a flat solution still gets a visible thickness
+    let e = e.map(|v| v.max(0.02));
+    let c = [(bb[0] + bb[3]) / 2.0, (bb[1] + bb[4]) / 2.0, (bb[2] + bb[5]) / 2.0];
+    // a mirrored placement walks the corners the other way round (faces outward)
+    let f = if det3(m) < 0.0 { -1.0 } else { 1.0 };
+    let at = |sx: f64, sy: f64, sz: f64| place(c, m, [sx * e[0], f * sy * e[1], sz * e[2]]);
+    Some((
+        [at(-1.0, -1.0, -1.0), at(1.0, -1.0, -1.0), at(1.0, 1.0, -1.0), at(-1.0, 1.0, -1.0)],
+        [at(-1.0, -1.0, 1.0), at(1.0, -1.0, 1.0), at(1.0, 1.0, 1.0), at(-1.0, 1.0, 1.0)],
+    ))
+}
+
 /// Determinant of a 3×3 (row-major): negative for a mirrored placement.
 fn det3(m: &[f64; 9]) -> f64 {
     m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6]) + m[2] * (m[3] * m[7] - m[4] * m[6])
@@ -2215,6 +2286,9 @@ pub fn scene(doc: &Document) -> Scene {
         }
         n_box += 1;
         *box_by_cat.entry(i.cat).or_default() += 1;
+        if dbg_inst {
+            eprintln!("asbox {} {} {:.3}", i.id, i.cat, i.rotation.map(|m| m[8]).unwrap_or(1.0));
+        }
         // RVT_MESH_DEBUG_BOX=<category>: why an instance of that category stays a box
         if std::env::var("RVT_MESH_DEBUG_BOX").ok().and_then(|v| v.parse::<i32>().ok()) == Some(i.cat) && box_by_cat[&i.cat] <= 6 {
             let c = i.symbol.and_then(|s| shape_cache.get(&s)).map(|c| c.len()).unwrap_or(0);
@@ -2274,6 +2348,11 @@ pub fn scene(doc: &Document) -> Scene {
                     continue;
                 }
             }
+        }
+        // step 2261: a turned instance: the oriented box behind its stored box
+        if let Some((bot, top)) = i.rotation.and_then(|m| oriented_box(&bb, &m)) {
+            batch!(name, color).hexa(bot, top);
+            continue;
         }
         batch!(name, color).aabb(bb);
     }
