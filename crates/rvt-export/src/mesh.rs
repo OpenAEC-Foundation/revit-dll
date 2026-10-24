@@ -231,12 +231,15 @@ fn sample(c: &Curve) -> Vec<P3> {
 fn plan_loops(curves: &[Curve]) -> (Vec<Vec<Vec<[f64; 2]>>>, f64) {
     let pieces: Vec<Vec<P3>> = curves.iter().map(sample).filter(|p| p.len() >= 2).collect();
     let z = pieces.first().map(|p| p[0][2]).unwrap_or(0.0);
-    (group_loops(pieces), z)
+    (group_loops(pieces, false), z)
 }
 
 /// Chains polyline pieces (x, y used) into closed loops and groups them as (outer, holes...).
-fn group_loops(mut pieces: Vec<Vec<P3>>) -> Vec<Vec<Vec<[f64; 2]>>> {
-    let close = |a: P3, b: P3| (a[0] - b[0]).abs() < 1e-4 && (a[1] - b[1]).abs() < 1e-4;
+/// With `strict` (family profiles, step 2218) chains that do not close are dropped instead of being
+/// closed by a straight edge (an open chain gave triangular wedges), with a 1e-3 ft tolerance.
+fn group_loops(mut pieces: Vec<Vec<P3>>, strict: bool) -> Vec<Vec<Vec<[f64; 2]>>> {
+    let tol = if strict { 1e-3 } else { 1e-4 };
+    let close = |a: P3, b: P3| (a[0] - b[0]).abs() < tol && (a[1] - b[1]).abs() < tol;
     let mut loops: Vec<Vec<[f64; 2]>> = Vec::new();
     while let Some(first) = pieces.pop() {
         let mut path = first;
@@ -251,6 +254,9 @@ fn group_loops(mut pieces: Vec<Vec<P3>>) -> Vec<Vec<Vec<[f64; 2]>>> {
                 next.reverse();
             }
             path.extend(next.into_iter().skip(1));
+        }
+        if strict && !(path.len() > 2 && close(*path.last().expect("non-empty"), path[0])) {
+            continue;
         }
         let mut l: Vec<[f64; 2]> = path.iter().map(|p| [p[0], p[1]]).collect();
         if l.len() > 1 && close([l[0][0], l[0][1], 0.0], [l[l.len() - 1][0], l[l.len() - 1][1], 0.0]) {
@@ -300,7 +306,7 @@ fn family_triangles(solids: &[&ExtrusionSolid]) -> Vec<[P3; 3]> {
         if !(t1 > t0) {
             continue;
         }
-        for g in group_loops(pieces) {
+        for g in group_loops(pieces, true) {
             if g.is_empty() || g[0].len() < 3 {
                 continue;
             }
@@ -682,6 +688,9 @@ pub fn scene(doc: &Document) -> Scene {
             let sol = solids_of(sym);
             if !sol.is_empty() {
                 let local = family_triangles(&sol);
+                if std::env::var("RVT_MESH_DEBUG").ok().and_then(|v| v.parse::<u64>().ok()) == Some(i.id) {
+                    eprintln!("debug {}: {} solids, {} local triangles, bbox {:?}", i.id, sol.len(), local.len(), bb);
+                }
                 let bounds = |tris: &[[P3; 3]]| {
                     let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
                     for t in tris {
@@ -718,6 +727,15 @@ pub fn scene(doc: &Document) -> Scene {
                             }
                         }
                         let (slo, shi) = bounds(&local);
+                        // step 2218: the stored box of a door also covers its swing (8 ft deep for a
+                        // 0.14 ft leaf); only moderate stretches (0.5–2 per axis) are plausible
+                        let plausible = (0..3).all(|k| {
+                            let (se, ee) = (shi[k] - slo[k], ehi[k] - elo[k]);
+                            se < 1e-6 || (ee / se >= 0.5 && ee / se <= 2.0)
+                        });
+                        if !plausible {
+                            return None;
+                        }
                         let map = |p: P3| -> P3 {
                             let mut r = [0.0; 3];
                             for k in 0..3 {
@@ -726,7 +744,15 @@ pub fn scene(doc: &Document) -> Scene {
                             }
                             place(o, &m, r)
                         };
-                        local.iter().map(|t| [map(t[0]), map(t[1]), map(t[2])]).collect()
+                        Some(local.iter().map(|t| [map(t[0]), map(t[1]), map(t[2])]).collect())
+                    })
+                    .flatten()
+                    // otherwise the unscaled family shape when it lies inside the stored box
+                    .or_else(|| {
+                        let inside = (0..3).all(|k| lo[k] >= bb[k] - 0.15 && hi[k] <= bb[k + 3] + 0.15);
+                        // doors and windows: the stored box includes the swing, so it is no fallback
+                        let opening = matches!(i.cat, -2000023 | -2000014);
+                        (!covers && (inside || opening) && !world.is_empty()).then(|| world.clone())
                     });
                 if covers || fitted.is_some() {
                     let b = batch!(name, color);
