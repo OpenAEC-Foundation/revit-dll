@@ -1433,10 +1433,37 @@ pub fn scene(doc: &Document) -> Scene {
         .map(|w| (w.id as i64, (w.p0, w.p1, doc.type_thickness(w.wall_type).filter(|t| *t > 0.0).unwrap_or(0.5))))
         .collect();
     let host_of: std::collections::HashMap<u64, i64> = doc.hosted().into_iter().filter_map(|h| h.host.map(|x| (h.id, x))).collect();
+    // RVT_MESH_DEBUG_INST=1: surface (m²) drawn per instance and batch, for comparison with Revit
+    let dbg_inst = std::env::var("RVT_MESH_DEBUG_INST").is_ok();
+    let mut prev_inst: Option<(u64, i32, Vec<(&'static str, usize)>)> = None;
+    let report = |batches: &BTreeMap<&'static str, Batch>, prev: &(u64, i32, Vec<(&'static str, usize)>)| {
+        for (name, n0) in &prev.2 {
+            let Some(b) = batches.get(name) else { continue };
+            if b.indices.len() > *n0 {
+                let p = |i: u32| -> P3 {
+                    let k = i as usize * 3;
+                    [b.positions[k] as f64, b.positions[k + 1] as f64, b.positions[k + 2] as f64]
+                };
+                let a: f64 = b.indices[*n0..].chunks_exact(3).map(|t| norm(cross(sub(p(t[1]), p(t[0])), sub(p(t[2]), p(t[0])))) / 2.0).sum();
+                eprintln!("inst {} {} {} {:.3}", prev.0, prev.1, name, a);
+            }
+        }
+    };
     'inst: for i in insts.iter().filter(|i| i.scale.is_none() && i.origin.is_some()) {
+        if dbg_inst {
+            if let Some(pv) = prev_inst.take() {
+                report(&batches, &pv);
+            }
+            prev_inst = Some((i.id, i.cat, batches.iter().map(|(k, b)| (*k, b.indices.len())).collect()));
+        }
         let Some(e) = doc.element(i.id) else { continue };
         if e.view.is_some_and(|v| v != -1) {
             continue; // view-specific (annotation)
+        }
+        // step 2243: masses are hidden in views unless 'Show Mass' is on (rac_basic: in-place mass
+        // 'water', 180 m2 not in Revit's view)
+        if i.cat == -2003400 {
+            continue;
         }
         // step 2240: columns have no stored box; build one from the family shape in plan and the
         // level block (§30.5) in z, so the fit below stretches the shape to the column height
