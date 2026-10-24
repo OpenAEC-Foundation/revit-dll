@@ -1419,6 +1419,20 @@ pub fn scene(doc: &Document) -> Scene {
             .map(|v| v.iter().filter(|s| s.void != Some(true) && s.host_block.is_none()).collect())
             .unwrap_or_default()
     };
+    // step 2249: columns are never face-based; a column family whose only extrusion carries the
+    // host block mark (rme 2026 structural columns) shows that extrusion
+    let column_solids_of = |sym: u64| -> Vec<&ExtrusionSolid> {
+        let shown = solids_of(sym);
+        if !shown.is_empty() {
+            return shown;
+        }
+        symbol_family
+            .get(&sym)
+            .and_then(|f| family_chain.get(f))
+            .and_then(|k| chain_solids.get(k))
+            .map(|v| v.iter().filter(|s| s.void != Some(true)).collect())
+            .unwrap_or_default()
+    };
     let chain_blrev: std::collections::HashMap<(String, usize), (Vec<BlendSolid>, Vec<RevolveSolid>)> =
         doc.family_blends_revolves_by_chain().into_iter().map(|(st, ix, b, r)| ((st, ix), (b, r))).collect();
     let blrev_of = |sym: u64| -> Vec<[P3; 3]> {
@@ -1546,7 +1560,7 @@ pub fn scene(doc: &Document) -> Scene {
             let (sym, o, m) = (i.symbol?, i.origin?, i.rotation?);
             let zb = doc.level_elevation(c.base_level)? + c.base_offset;
             let zt = doc.level_elevation(c.top_level)? + c.top_offset;
-            let mut local = family_triangles(&solids_of(sym));
+            let mut local = family_triangles(&column_solids_of(sym));
             for sw in sweeps_of(sym) {
                 local.extend(sweep_triangles(sw));
             }
@@ -1665,7 +1679,7 @@ pub fn scene(doc: &Document) -> Scene {
             let candidates = shape_cache
                 .entry(sym)
                 .or_insert_with(|| {
-                    let sol = solids_of(sym);
+                    let sol = if matches!(i.cat, -2000100 | -2001330) { column_solids_of(sym) } else { solids_of(sym) };
                     let swp = sweeps_of(sym);
                     let br = blrev_of(sym);
                     // step 2224: all forms first; when a sweep spoils the fit, without sweeps; then
