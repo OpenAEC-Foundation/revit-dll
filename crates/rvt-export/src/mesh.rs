@@ -631,8 +631,31 @@ fn segment_batch(cat: Option<i32>) -> (&'static str, [f32; 3]) {
 /// Builds the viewer scene of a document.
 pub fn scene(doc: &Document) -> Scene {
     // step 2227: the expensive readers once
-    let walls_all = doc.walls();
-    let insts_all: Vec<Instance> = doc.instances();
+    let walls_all = {
+        // step 2228: one record per id (a wall can appear in two project chains)
+        let mut seen = std::collections::HashSet::new();
+        doc.walls().into_iter().filter(|w| seen.insert(w.id)).collect::<Vec<_>>()
+    };
+    // step 2228: an element can appear in two project chains (Storax: 366 copies in a second chain,
+    // mostly without a type); keep one record per id, the one with a type
+    let insts_all: Vec<Instance> = {
+        let mut by_id: Vec<Instance> = Vec::new();
+        let mut at: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+        for i in doc.instances() {
+            match at.get(&i.id) {
+                Some(&k) => {
+                    if by_id[k].symbol.is_none() && i.symbol.is_some() {
+                        by_id[k] = i;
+                    }
+                }
+                None => {
+                    at.insert(i.id, by_id.len());
+                    by_id.push(i);
+                }
+            }
+        }
+        by_id
+    };
     let mut batches: BTreeMap<&'static str, Batch> = BTreeMap::new();
     fn get<'a>(m: &'a mut BTreeMap<&'static str, Batch>, name: &'static str, color: [f32; 3]) -> &'a mut Batch {
         m.entry(name).or_insert_with(|| Batch::new(name, color))
