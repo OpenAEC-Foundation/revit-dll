@@ -576,6 +576,16 @@ impl Document {
             .collect()
     }
 
+    /// Step 2264: parameter names of chain 0 of every partition (a project can be spread over
+    /// partitions, step 2263).
+    pub fn parameter_names_global(&self) -> HashMap<u64, Option<String>> {
+        self.partitions
+            .iter()
+            .filter_map(|p| p.chains.first().filter(|c| c.bits.is_some()))
+            .flat_map(params::parameter_names)
+            .collect()
+    }
+
     /// Parameter names (§9.1) of a chain, by ParameterElement id.
     pub fn parameter_names_of(&self, stream: &str, index: usize) -> HashMap<u64, Option<String>> {
         self.partitions

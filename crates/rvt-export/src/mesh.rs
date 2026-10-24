@@ -1823,6 +1823,58 @@ pub fn scene(doc: &Document) -> Scene {
         }
         (1.0, 1.0)
     };
+    // Step 2264: type sizes of any family. Width (−1001301 or 'Width'/'Length') along local x,
+    // Depth (−1010003 or 'Depth') along y, Height (−1001300 or 'Height') along z: the symbol's own
+    // value set against the family type whose sizes match the unscaled forms (snowdon casework
+    // 906914: type 30" = 2.5 ft wide, the forms are the family's 36" = 3.0 ft). Scaled about the
+    // family origin. Tried per instance before the other routes, and kept only when the scaled
+    // shape lies in the stored box (±0.15 ft; rme face-based air terminals: no 'Height' along z).
+    let global_names = doc.parameter_names_global();
+    let typed: std::cell::RefCell<std::collections::HashMap<u64, [f64; 3]>> = Default::default();
+    let sizes = |set: &rvt_model::ValueSet, names: &std::collections::HashMap<u64, Option<String>>| -> [Option<f64>; 3] {
+        let named = |p: i64, want: &[&str]| p > 0 && names.get(&(p as u64)).cloned().flatten().is_some_and(|n| want.contains(&n.as_str()));
+        let pick = |bi: i64, want: &[&str]| {
+            set.rows.iter().find(|r| r.param == bi).or_else(|| set.rows.iter().find(|r| named(r.param, want))).map(|r| r.num).filter(|v| *v > 1e-6)
+        };
+        [pick(-1001301, &["Width", "Length"]), pick(-1010003, &["Depth"]), pick(-1001300, &["Height"])]
+    };
+    let type_scale = |sym: u64, own: &[[P3; 3]]| -> Option<[f64; 3]> {
+        let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+        for t in own {
+            for q in t {
+                for k in 0..3 {
+                    lo[k] = lo[k].min(q[k]);
+                    hi[k] = hi[k].max(q[k]);
+                }
+            }
+        }
+        let ext = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+        let (vs, _) = sym_values.get(&sym)?;
+        let target = sizes(vs, &global_names);
+        if target.iter().all(|v| v.is_none()) {
+            return None;
+        }
+        let key = symbol_family.get(&sym).and_then(|f| family_chain.get(f))?;
+        let fnames = {
+            let mut cache = chain_names.borrow_mut();
+            cache.entry(key.clone()).or_insert_with(|| doc.parameter_names_of(&key.0, key.1)).clone()
+        };
+        let mut cache = chain_sets.borrow_mut();
+        let sets = cache.entry(key.clone()).or_insert_with(|| doc.value_sets_of(&key.0, key.1));
+        let close = |a: f64, b: f64| (a - b).abs() <= 0.05 * a.max(b);
+        // the family type the forms are drawn at: every known size matches, the most sizes first
+        let default = sets
+            .iter()
+            .map(|set| sizes(set, &fnames))
+            .filter(|d| (0..3).all(|k| d[k].is_none_or(|v| close(v, ext[k]))))
+            .max_by_key(|d| d.iter().filter(|v| v.is_some()).count())?;
+        let sc: [f64; 3] = std::array::from_fn(|k| match (target[k], default[k]) {
+            (Some(t), Some(d)) => t / d,
+            _ => 1.0,
+        });
+        (sc.iter().any(|v| (v - 1.0).abs() > 0.01) && sc.iter().all(|v| (0.2..=5.0).contains(v))).then_some(sc)
+    };
+    let scale3 = |t: &[[P3; 3]], sc: [f64; 3]| -> Vec<[P3; 3]> { t.iter().map(|tr| tr.map(|q| [q[0] * sc[0], q[1] * sc[1], q[2] * sc[2]])).collect() };
     let scale_plan = |t: &[[P3; 3]], (sx, sy): (f64, f64)| -> Vec<[P3; 3]> {
         t.iter().map(|tr| tr.map(|q| [q[0] * sx, q[1] * sy, q[2]])).collect()
     };
@@ -2027,6 +2079,10 @@ pub fn scene(doc: &Document) -> Scene {
                         let sc = column_scale(sym, &all);
                         (scale_plan(&ext_only, sc), scale_plan(&no_sweeps, sc), scale_plan(&all, sc))
                     } else {
+                        // step 2264: the type's own sizes, tried per instance below
+                        if let Some(sc) = type_scale(sym, &all) {
+                            typed.borrow_mut().insert(sym, sc);
+                        }
                         (ext_only, no_sweeps, all)
                     };
                     // step 2246: nested families; candidates with them first (a shared nested component
@@ -2196,6 +2252,24 @@ pub fn scene(doc: &Document) -> Scene {
                     }
                     (lo, hi)
                 };
+                // step 2264: first the shape at its type size, when that lies in the stored box
+                if let Some(sc) = typed.borrow().get(&sym).copied() {
+                    let ws: Vec<[P3; 3]> = scale3(local, sc).iter().map(|t| [place(o, &m, t[0]), place(o, &m, t[1]), place(o, &m, t[2])]).collect();
+                    let (sl, sh) = bounds(&ws);
+                    if !ws.is_empty() && (0..3).all(|k| sl[k] >= bb[k] - 0.15 && sh[k] <= bb[k + 3] + 0.15) {
+                        let b = batch!(name, color);
+                        let rev = det3(&m) < 0.0;
+                        for t in ws {
+                            if rev {
+                                b.tri(t[2], t[1], t[0]);
+                            } else {
+                                b.tri(t[0], t[1], t[2]);
+                            }
+                        }
+                        n_family += 1;
+                        continue 'inst;
+                    }
+                }
                 let world: Vec<[P3; 3]> = local.iter().map(|t| [place(o, &m, t[0]), place(o, &m, t[1]), place(o, &m, t[2])]).collect();
                 let (lo, hi) = bounds(&world);
                 let covers = !world.is_empty() && (0..3).all(|k| (lo[k] - bb[k]).abs() < 0.15 && (hi[k] - bb[k + 3]).abs() < 0.15);
