@@ -1964,12 +1964,16 @@ pub fn scene(doc: &Document) -> Scene {
                         // the shape (rme troffers: box 2 ft high, Revit's shape 0.49 ft) keeps the
                         // family size; doors and windows as before
                         let keep: [bool; 3] = std::array::from_fn(|k| {
-                            shi[k] - slo[k] > 1e-6 && if opening { factor(k) > 2.0 && (k != 2 || factor(k) > 4.0) } else { factor(k) > 2.0 && !(matches!(i.cat, -2000100 | -2001330) && k == 2) }
+                            // step 2255: structural framing stretches freely (its length follows the
+                            // beam, its profile the stored box)
+                            shi[k] - slo[k] > 1e-6
+                                && i.cat != -2001320
+                                && if opening { factor(k) > 2.0 && (k != 2 || factor(k) > 4.0) } else { factor(k) > 2.0 && !(matches!(i.cat, -2000100 | -2001330) && k == 2) }
                         });
                         let plausible = (0..3).all(|k| {
                             let se = shi[k] - slo[k];
                             // step 2240: a column's length is fully parametric (vertical axis free)
-                            let column = matches!(i.cat, -2000100 | -2001330) && k == 2;
+                            let column = (matches!(i.cat, -2000100 | -2001330) && k == 2) || i.cat == -2001320;
                             se < 1e-6 || keep[k] || (factor(k) >= 0.05 && (column || factor(k) <= if opening { 4.0 } else { 2.0 }))
                         });
                         if !plausible || keep.iter().all(|x| *x) {
