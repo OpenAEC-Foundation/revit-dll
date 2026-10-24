@@ -569,3 +569,11 @@ pub struct BuildingPad {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outline: Option<Vec<Curve>>,
 }
+
+/// Wall attached to a roof, floor or ceiling (step 2237); flag 1 = top.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct WallAttachment {
+    pub id: u64,
+    pub target: i64,
+    pub flag: u32,
+}

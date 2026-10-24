@@ -15,6 +15,7 @@ const USAGE: &str = "usage:
   rvt stairs <file.rvt>                component stairs (riser, tread, levels, height, runs)
   rvt legacy_stairs <file.rvt>         old sketch-based stairs (levels, type, sketch lines)
   rvt topography <file.rvt>            topography surfaces (terrain points)
+  rvt wall_attachments <file.rvt>      walls attached to roofs/floors/ceilings
   rvt building_pads <file.rvt>         building pads (level, offset, outline, cut surface)
   rvt group_definition_members <file>  hidden group type definition copies
   rvt stairs_runs <file.rvt>           stairs runs (width, base and top elevation)
@@ -126,6 +127,12 @@ fn run(args: &[String]) -> Result<Value, String> {
             let doc = rvt_read::Document::open(path).map_err(err)?;
             let chains: Vec<Value> =
                 doc.building_pads_by_chain().into_iter().map(|(s, i, v)| json!({"stream": s, "index": i, "building_pads": v})).collect();
+            Ok(json!({"chains": chains}))
+        }
+        "wall_attachments" => {
+            let doc = rvt_read::Document::open(path).map_err(err)?;
+            let chains: Vec<Value> =
+                doc.wall_attachments_by_chain().into_iter().map(|(s, i, v)| json!({"stream": s, "index": i, "wall_attachments": v})).collect();
             Ok(json!({"chains": chains}))
         }
         "topography" => {

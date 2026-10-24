@@ -442,6 +442,15 @@ impl Document {
         self.building_pads_by_chain().into_iter().flat_map(|(_, _, v)| v).collect()
     }
 
+    /// Wall attachments (top/bottom attached to a roof, floor or ceiling) per project chain (step 2237).
+    pub fn wall_attachments_by_chain(&self) -> Vec<(String, usize, Vec<rvt_model::WallAttachment>)> {
+        self.project_chains().map(|(p, ch)| (p.stream.clone(), ch.index, walls::wall_attachments(ch))).collect()
+    }
+
+    pub fn wall_attachments(&self) -> Vec<rvt_model::WallAttachment> {
+        self.wall_attachments_by_chain().into_iter().flat_map(|(_, _, v)| v).collect()
+    }
+
     /// Topography surfaces per project chain (step 1532).
     pub fn topography_by_chain(&self) -> Vec<(String, usize, Vec<Topography>)> {
         self.project_chains().map(|(p, ch)| (p.stream.clone(), ch.index, topography::topography(ch))).collect()

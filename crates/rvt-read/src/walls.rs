@@ -6,7 +6,7 @@ use rvt_core::{vtag, Chain};
 use rvt_model::{ArcCurve, Wall};
 
 use crate::curves::{arc_point, block, nodenorm, Block};
-use crate::util::{f64_at, find, i32_at, i64_at};
+use crate::util::{f64_at, find, i32_at, i64_at, u32_at};
 
 const CAT_WALLS: i32 = -2000011;
 const CAT_STACKED: i32 = -2003500;
@@ -223,6 +223,32 @@ pub(crate) fn walls(ch: &Chain, ctx: &WallContext) -> Vec<Wall> {
             }
         }
         out.push(wall);
+    }
+    out
+}
+
+/// Step 2237: wall attached to a roof, floor or ceiling ("attach top"): the wall body holds
+/// `u32 1 | id target | u32 flag | ffffffff` (id i64, 32-bit i32), target of category −2000035,
+/// −2000032 or −2000038; flag 1 = top (API WALL_TOP_IS_ATTACHED: rac_basic 16/16, dyn 1/1). First
+/// hit per (wall, target).
+pub(crate) fn wall_attachments(ch: &Chain) -> Vec<rvt_model::WallAttachment> {
+    let targets: HashSet<i64> = ch.elements.iter().filter(|e| matches!(e.cat, -2000035 | -2000032 | -2000038)).map(|e| e.id as i64).collect();
+    if targets.is_empty() {
+        return vec![];
+    }
+    let bits32 = ch.bits == Some(32);
+    let w = if bits32 { 4 } else { 8 };
+    let mut out = Vec::new();
+    for e in ch.elements.iter().filter(|e| e.cat == -2000011) {
+        let b = ch.body(e);
+        let mut seen = HashSet::new();
+        for o in 4..b.len().saturating_sub(8 + w) {
+            let v = if bits32 { i32_at(b, o) as i64 } else { i64_at(b, o) };
+            if targets.contains(&v) && !seen.contains(&v) && u32_at(b, o - 4) == 1 && u32_at(b, o + w + 4) == 0xffff_ffff {
+                seen.insert(v);
+                out.push(rvt_model::WallAttachment { id: e.id, target: v, flag: u32_at(b, o + w) });
+            }
+        }
     }
     out
 }

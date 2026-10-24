@@ -194,6 +194,63 @@ fn point_in(pt: [f64; 2], l: &[[f64; 2]]) -> bool {
     c
 }
 
+/// z where the vertical line through (x, y) meets triangle `t`, if it does.
+fn ray_z(t: &[P3; 3], x: f64, y: f64) -> Option<f64> {
+    let (a, b, c) = (t[0], t[1], t[2]);
+    let d = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]);
+    if d.abs() < 1e-12 {
+        return None;
+    }
+    let l1 = ((b[1] - c[1]) * (x - c[0]) + (c[0] - b[0]) * (y - c[1])) / d;
+    let l2 = ((c[1] - a[1]) * (x - c[0]) + (a[0] - c[0]) * (y - c[1])) / d;
+    let l3 = 1.0 - l1 - l2;
+    (l1 > -1e-9 && l2 > -1e-9 && l3 > -1e-9).then(|| l1 * a[2] + l2 * b[2] + l3 * c[2])
+}
+
+/// Triangles of a batch back in model coordinates (feet, Z up).
+fn batch_tris(b: &Batch) -> Vec<[P3; 3]> {
+    let p = |i: u32| -> P3 {
+        let k = i as usize * 3;
+        let v = &b.positions[k..k + 3];
+        [v[0] as f64 / FT, -(v[2] as f64) / FT, v[1] as f64 / FT]
+    };
+    b.indices.chunks_exact(3).map(|t| [p(t[0]), p(t[1]), p(t[2])]).collect()
+}
+
+/// Slab of closed sketch loops with its top (or bottom) at `z0`.
+fn slab_into(b: &mut Batch, curves: &[Curve], z0: Option<f64>, thickness: f64, down: bool) {
+    let (groups, cz) = plan_loops(curves);
+    let z = z0.unwrap_or(cz);
+    let (lo, hi) = if down { (z - thickness, z) } else { (z, z + thickness) };
+    for g in groups {
+        b.prism(&g, lo, hi);
+    }
+}
+
+/// Roof: a footprint roof as a slab on its base; an extrusion roof (§32, steps 1359–1360): the
+/// profile lies in a vertical sketch plane with normal N; each profile segment becomes a plate of
+/// the roof thickness (hanging below the profile) swept along N from `end` to `start`.
+fn roof_into(b: &mut Batch, r: &rvt_model::Roof) {
+    let t = r.thickness.filter(|t| *t > 0.0).unwrap_or(0.75);
+    let curves: Vec<Curve> = r.edges.iter().map(|e| e.curve.clone()).collect();
+    if r.kind == "footprint" {
+        slab_into(b, &curves, r.base_z, t, false);
+        return;
+    }
+    let (Some(Some(n)), Some(s0), Some(s1)) = (r.normal, r.end, r.start) else { return };
+    let Some(n) = unit(n) else { return };
+    let (o0, o1) = (mul(n, s0), mul(n, s1));
+    for c in &curves {
+        for s in sample(c).windows(2) {
+            let (p, q) = (s[0], s[1]);
+            let Some(m) = unit(cross(n, sub(q, p))) else { continue };
+            let m = if m[2] > 0.0 { mul(m, -t) } else { mul(m, t) };
+            let (pb, qb) = (add(p, m), add(q, m));
+            b.hexa([add(pb, o0), add(qb, o0), add(qb, o1), add(pb, o1)], [add(p, o0), add(q, o0), add(q, o1), add(p, o1)]);
+        }
+    }
+}
+
 /// Polyline of a curve (model coordinates).
 fn sample(c: &Curve) -> Vec<P3> {
     let arc_pts = |center: P3, rx: f64, ry: f64, x: P3, y: P3, t0: f64, t1: f64| {
@@ -708,6 +765,32 @@ pub fn scene(doc: &Document) -> Scene {
             ext.iter().all(|v| v.is_finite() && *v >= 0.0 && *v < 1e4) && ext.iter().filter(|v| **v * FT > 3.0).count() < 2
         })
         .collect();
+    // step 2237: top-attached walls and the triangles of their roofs/floors/ceilings
+    let mut attach_top: std::collections::HashMap<u64, Vec<i64>> = std::collections::HashMap::new();
+    for a in doc.wall_attachments().into_iter().filter(|a| a.flag == 1) {
+        attach_top.entry(a.id).or_default().push(a.target);
+    }
+    let target_tris: std::collections::HashMap<i64, Vec<[P3; 3]>> = {
+        let want: std::collections::HashSet<i64> = attach_top.values().flatten().copied().collect();
+        let mut m = std::collections::HashMap::new();
+        if !want.is_empty() {
+            for r in doc.roofs().iter().filter(|r| want.contains(&(r.id as i64))) {
+                let mut tb = Batch::new("tmp", [0.0; 3]);
+                roof_into(&mut tb, r);
+                m.insert(r.id as i64, batch_tris(&tb));
+            }
+            let floors = doc.floors();
+            let ceilings = doc.ceilings();
+            for (f, down, dt) in floors.iter().map(|f| (f, true, 0.5)).chain(ceilings.iter().map(|f| (f, false, 0.08))) {
+                if want.contains(&(f.id as i64)) {
+                    let mut tb = Batch::new("tmp", [0.0; 3]);
+                    slab_into(&mut tb, &f.curves, f.top_z, f.thickness.filter(|t| *t > 0.0).unwrap_or(dt), down);
+                    m.insert(f.id as i64, batch_tris(&tb));
+                }
+            }
+        }
+        m
+    };
     // step 2236: door/window openings per host wall: (u0, u1, z0, z1) along the wall line
     let openings: std::collections::HashMap<u64, Vec<(f64, f64, f64, f64)>> = {
         let wall_line: std::collections::HashMap<u64, (P3, P3)> = walls_all.iter().map(|w| (w.id, (w.p0, w.p1))).collect();
@@ -754,53 +837,79 @@ pub fn scene(doc: &Document) -> Scene {
         // step 2236: door/window openings (straight walls): their stored box projected on the wall
         // line gives the interval along the wall, its z range the height
         let holes: Vec<(f64, f64, f64, f64)> = if line.len() == 2 { openings.get(&w.id).cloned().unwrap_or_default() } else { vec![] };
-        if !holes.is_empty() {
+        // step 2237: a wall attached at its top follows the underside of its roof/floor
+        let tops: Vec<&Vec<[P3; 3]>> = attach_top.get(&w.id).map(|ts| ts.iter().filter_map(|t| target_tris.get(t)).collect()).unwrap_or_default();
+        if line.len() == 2 && (!holes.is_empty() || !tops.is_empty()) {
             let (a, c) = ([line[0][0], line[0][1], 0.0], [line[1][0], line[1][1], 0.0]);
             if let Some(d) = unit(sub(c, a)) {
                 let len = norm(sub(c, a));
-                let (z0, z1) = (base, base + height);
-                let hs: Vec<(f64, f64, f64, f64)> = holes
-                    .iter()
-                    .map(|&(u0, u1, h0, h1)| (u0.max(0.0), u1.min(len), h0.max(z0), h1.min(z1)))
-                    .filter(|h| h.1 - h.0 > 1e-3 && h.3 - h.2 > 1e-3)
-                    .collect();
+                let z0 = base;
+                let zmax = z0 + height;
+                // top along the wall: the lowest target face above the base (a vertical ray), else
+                // the wall height
+                let top_at = |u: f64| -> f64 {
+                    let p = add(a, mul(d, u));
+                    let hit = tops
+                        .iter()
+                        .flat_map(|ts| ts.iter())
+                        .filter_map(|t| ray_z(t, p[0], p[1]))
+                        .filter(|z| *z > z0 + 0.1)
+                        .fold(f64::INFINITY, f64::min);
+                    if hit.is_finite() { hit } else { zmax }
+                };
                 let n = mul([-d[1], d[0], 0.0], t / 2.0);
-                let at = |u: f64, z: f64, s: f64| -> P3 { let p = add(a, add(mul(d, u), mul(n, s))); [p[0], p[1], z] };
-                // u breakpoints; per interval the solid z ranges
+                let at = |u: f64, z: f64, s: f64| -> P3 {
+                    let p = add(a, add(mul(d, u), mul(n, s)));
+                    [p[0], p[1], z]
+                };
+                // u breakpoints: ends, opening edges, and every ≤ 1 ft for an attached top
                 let mut us: Vec<f64> = vec![0.0, len];
-                for h in &hs {
-                    us.push(h.0);
-                    us.push(h.1);
+                for h in &holes {
+                    us.extend([h.0.clamp(0.0, len), h.1.clamp(0.0, len)]);
+                }
+                if !tops.is_empty() {
+                    let k = (len.ceil() as usize).max(1);
+                    us.extend((1..k).map(|i| len * i as f64 / k as f64));
                 }
                 us.sort_by(|x, y| x.total_cmp(y));
                 us.dedup_by(|x, y| (*x - *y).abs() < 1e-6);
-                for win in us.windows(2) {
+                let tz: Vec<f64> = us.iter().map(|&u| if tops.is_empty() { zmax } else { top_at(u) }).collect();
+                let hs: Vec<(f64, f64, f64, f64)> = holes
+                    .iter()
+                    .map(|&(u0, u1, h0, h1)| (u0.max(0.0), u1.min(len), h0.max(z0), h1))
+                    .filter(|h| h.1 - h.0 > 1e-3 && h.3 - h.2 > 1e-3)
+                    .collect();
+                for (j, win) in us.windows(2).enumerate() {
                     let (ua, ub) = (win[0], win[1]);
+                    let (ta, tb) = (tz[j], tz[j + 1]);
                     let um = (ua + ub) / 2.0;
-                    let mut cuts: Vec<(f64, f64)> = hs.iter().filter(|h| h.0 <= um && um <= h.1).map(|h| (h.2, h.3)).collect();
+                    let tmin = ta.min(tb);
+                    let mut cuts: Vec<(f64, f64)> =
+                        hs.iter().filter(|h| h.0 <= um && um <= h.1).map(|h| (h.2, h.3.min(tmin))).filter(|c| c.1 > c.0).collect();
                     cuts.sort_by(|x, y| x.0.total_cmp(&y.0));
-                    let mut solid = Vec::new();
+                    // solid z ranges; the last one ends on the (sloped) top
+                    let mut solid: Vec<(f64, f64, bool)> = Vec::new();
                     let mut zc = z0;
                     for (c0, c1) in cuts {
                         if c0 > zc + 1e-6 {
-                            solid.push((zc, c0));
+                            solid.push((zc, c0, false));
                         }
                         zc = zc.max(c1);
                     }
-                    if z1 > zc + 1e-6 {
-                        solid.push((zc, z1));
+                    if ta.max(tb) > zc + 1e-6 {
+                        solid.push((zc, tmin, true));
                     }
-                    for (za, zb) in solid {
-                        // faces on both sides, plus the horizontal faces of this cell
-                        b.quad(at(ua, za, -1.0), at(ub, za, -1.0), at(ub, zb, -1.0), at(ua, zb, -1.0));
-                        b.quad(at(ub, za, 1.0), at(ua, za, 1.0), at(ua, zb, 1.0), at(ub, zb, 1.0));
-                        b.quad(at(ua, zb, -1.0), at(ub, zb, -1.0), at(ub, zb, 1.0), at(ua, zb, 1.0));
+                    for (za, zb, last) in solid {
+                        let (zta, ztb) = if last { (ta, tb) } else { (zb, zb) };
+                        b.quad(at(ua, za, -1.0), at(ub, za, -1.0), at(ub, ztb, -1.0), at(ua, zta, -1.0));
+                        b.quad(at(ub, za, 1.0), at(ua, za, 1.0), at(ua, zta, 1.0), at(ub, ztb, 1.0));
+                        b.quad(at(ua, zta, -1.0), at(ub, ztb, -1.0), at(ub, ztb, 1.0), at(ua, zta, 1.0));
                         b.quad(at(ua, za, 1.0), at(ub, za, 1.0), at(ub, za, -1.0), at(ua, za, -1.0));
                     }
                 }
                 // wall ends and the jambs of each opening
-                for u in [0.0, len] {
-                    b.quad(at(u, z0, 1.0), at(u, z0, -1.0), at(u, z1, -1.0), at(u, z1, 1.0));
+                for (u, tt) in [(0.0, tz[0]), (len, tz[tz.len() - 1])] {
+                    b.quad(at(u, z0, 1.0), at(u, z0, -1.0), at(u, tt, -1.0), at(u, tt, 1.0));
                 }
                 for h in &hs {
                     for u in [h.0, h.1] {
@@ -822,14 +931,7 @@ pub fn scene(doc: &Document) -> Scene {
         }
     }
 
-    let slab = |b: &mut Batch, curves: &[Curve], z0: Option<f64>, thickness: f64, down: bool| {
-        let (groups, cz) = plan_loops(curves);
-        let z = z0.unwrap_or(cz);
-        let (lo, hi) = if down { (z - thickness, z) } else { (z, z + thickness) };
-        for g in groups {
-            b.prism(&g, lo, hi);
-        }
-    };
+    let slab = slab_into;
     for f in doc.floors() {
         let t = f.thickness.filter(|t| *t > 0.0).unwrap_or(0.5);
         slab(batch!("Floors", [0.62, 0.60, 0.56]), &f.curves, f.top_z, t, true);
@@ -839,31 +941,7 @@ pub fn scene(doc: &Document) -> Scene {
         slab(batch!("Ceilings", [0.93, 0.92, 0.90]), &f.curves, f.top_z, t, false);
     }
     for r in doc.roofs() {
-        let t = r.thickness.filter(|t| *t > 0.0).unwrap_or(0.75);
-        let curves: Vec<Curve> = r.edges.iter().map(|e| e.curve.clone()).collect();
-        if r.kind == "footprint" {
-            slab(batch!("Roofs", [0.60, 0.30, 0.18]), &curves, r.base_z, t, false);
-            continue;
-        }
-        // Extrusion roof (§32, steps 1359–1360): the profile lies in a vertical sketch plane with
-        // normal N; each profile segment becomes a plate of the roof thickness (hanging below the
-        // profile) swept along N from `end` to `start`.
-        let (Some(Some(n)), Some(s0), Some(s1)) = (r.normal, r.end, r.start) else { continue };
-        let Some(n) = unit(n) else { continue };
-        let b = batch!("Roofs", [0.60, 0.30, 0.18]);
-        let (o0, o1) = (mul(n, s0), mul(n, s1));
-        for c in &curves {
-            for s in sample(c).windows(2) {
-                let (p, q) = (s[0], s[1]);
-                let Some(m) = unit(cross(n, sub(q, p))) else { continue };
-                let m = if m[2] > 0.0 { mul(m, -t) } else { mul(m, t) };
-                let (pb, qb) = (add(p, m), add(q, m));
-                b.hexa(
-                    [add(pb, o0), add(qb, o0), add(qb, o1), add(pb, o1)],
-                    [add(p, o0), add(q, o0), add(q, o1), add(p, o1)],
-                );
-            }
-        }
+        roof_into(batch!("Roofs", [0.60, 0.30, 0.18]), &r);
     }
 
     let segs: Vec<Segment> = doc.segments();
