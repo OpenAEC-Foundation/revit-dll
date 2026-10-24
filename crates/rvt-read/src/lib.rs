@@ -1,6 +1,7 @@
 //! Semantic readers: elements of a Revit file to the neutral model, behind a queryable [`Document`].
 
 mod compound;
+mod curve_elements;
 mod curves;
 mod families;
 mod hosted;
@@ -501,7 +502,7 @@ impl Document {
                 if ch.bits.is_none() || proj.contains(&(pi, ci)) {
                     continue;
                 }
-                out.push((p.stream.clone(), ch.index, solids::sweep_solids(ch)));
+                out.push((p.stream.clone(), ch.index, solids::sweep_solids(ch, &p.chains)));
             }
         }
         out

@@ -217,7 +217,7 @@ const TAG_SWEEP: u16 = 4226;
 /// Profile = curves of the profile sketch (in 3D, already placed on the path), path = curves of the
 /// path sketch, (X, Y, N) = path sketch plane. Pick-path sweeps (path = −1, step 565) and profile
 /// families (profile = −1, step 1012) are not ported yet.
-pub(crate) fn sweep_solids(ch: &Chain) -> Vec<rvt_model::SweepSolid> {
+pub(crate) fn sweep_solids(ch: &Chain, chains: &[Chain]) -> Vec<rvt_model::SweepSolid> {
     let Some(t) = mapped_tag(ch.version, TAG_SWEEP) else { return vec![] };
     let bits32 = ch.bits == Some(32);
     if !bits32 && ch.bits != Some(64) {
@@ -246,7 +246,7 @@ pub(crate) fn sweep_solids(ch: &Chain) -> Vec<rvt_model::SweepSolid> {
             ((l > 152).then(|| bd[149] == 1), (l >= 231).then(|| (u64_at(bd, 174), u64_at(bd, 223))))
         };
         let Some((ps, pa)) = sketches else { continue };
-        let (prof, mut path) = (cv(ps), cv(pa));
+        let (mut prof, mut path) = (cv(ps), cv(pa));
         // step 565: pick path (path sketch = −1): curve blocks in the path list element
         let mut frame: Option<([f64; 3], [f64; 3], [f64; 3])> = None;
         if path.is_empty() && pa == u64::MAX {
@@ -274,6 +274,49 @@ pub(crate) fn sweep_solids(ch: &Chain) -> Vec<rvt_model::SweepSolid> {
                         }
                     }
                 }
+            }
+        }
+        // steps 1012, 1121: profile family (profile sketch = −1), placed at the path start
+        if prof.is_empty() && ps == u64::MAX && !path.is_empty() {
+            let loc = profile_family_curves(ch, chains, &byid, e.id, bits32);
+            let c0 = &path[0];
+            let start = match (c0.p0, c0.p1, c0.center, c0.x, c0.y) {
+                (Some(a), Some(b), ..) => Some((a, [b[0] - a[0], b[1] - a[1], b[2] - a[2]])),
+                (_, _, Some(c), Some(x), Some(y)) => {
+                    let t0 = c0.t0.unwrap_or(0.0);
+                    let (rx, ry) = (c0.r.or(c0.rx).unwrap_or(0.0), c0.r.or(c0.ry).unwrap_or(0.0));
+                    let p0 = [0, 1, 2].map(|i| c[i] + rx * t0.cos() * x[i] + ry * t0.sin() * y[i]);
+                    let tg = [0, 1, 2].map(|i| -rx * t0.sin() * x[i] + ry * t0.cos() * y[i]);
+                    Some((p0, tg))
+                }
+                _ => None,
+            };
+            if let (false, Some((p0, tg))) = (loc.is_empty(), start) {
+                let l = (tg[0] * tg[0] + tg[1] * tg[1] + tg[2] * tg[2]).sqrt();
+                let l = if l == 0.0 { 1.0 } else { l };
+                let tg = [tg[0] / l, tg[1] / l, tg[2] / l];
+                let nn = match frame {
+                    Some((_, _, n)) => n,
+                    None => match (c0.x, c0.y) {
+                        (Some(x), Some(y)) => [x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]],
+                        _ => [0.0, 0.0, 1.0],
+                    },
+                };
+                let mut vv = [tg[1] * nn[2] - tg[2] * nn[1], tg[2] * nn[0] - tg[0] * nn[2], tg[0] * nn[1] - tg[1] * nn[0]];
+                let mut uu = nn;
+                // step 1121: profile plane (normal ∥ tangent) referenced by the sweep body
+                let planes = profile_planes(ch);
+                let sb = ch.body(e);
+                let w = if bits32 { 4 } else { 8 };
+                let pl = (60..sb.len().saturating_sub(w - 1)).find_map(|o| {
+                    let q = if bits32 { i32_at(sb, o) as i64 } else { i64_at(sb, o) };
+                    planes.get(&q).filter(|pl| (pl[3][0] * tg[0] + pl[3][1] * tg[1] + pl[3][2] * tg[2]).abs() > 0.999)
+                });
+                if let Some(pl) = pl {
+                    uu = pl[1];
+                    vv = pl[2];
+                }
+                prof = place_curves(&loc, p0, uu, vv);
             }
         }
         if prof.is_empty() || path.is_empty() {
@@ -349,4 +392,87 @@ fn pick_path(ch: &Chain, byid: &HashMap<u64, &Element>, sweep: u64, bits32: bool
         }
     }
     out
+}
+
+/// Step 815/1117: plane of a sweep profile plane element (tag 3338): first unit, perpendicular
+/// pair X, Y from @84 with a sane origin before it; (origin, x, y, normal).
+fn profile_planes(ch: &Chain) -> HashMap<i64, [[f64; 3]; 4]> {
+    let t = vtag(ch.version, 3338);
+    let mut out = HashMap::new();
+    for e in ch.elements.iter().filter(|e| e.tag.is_some() && e.tag == t) {
+        let b = ch.body(e);
+        let l = b.len();
+        if l < 48 {
+            continue;
+        }
+        for o in 84..l.saturating_sub(48) {
+            let (x, y) = (v3(b, o), v3(b, o + 24));
+            let sq = |v: &[f64; 3]| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2] - 1.0).abs() < 1e-9;
+            if x.iter().chain(y.iter()).all(|v| v.is_finite()) && sq(&x) && sq(&y) && (x[0] * y[0] + x[1] * y[1] + x[2] * y[2]).abs() < 1e-9 {
+                let org = v3(b, o - 24);
+                if !org.iter().all(|v| v.is_finite() && v.abs() < 1e6) {
+                    continue;
+                }
+                let n = [x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]];
+                out.insert(e.id as i64, [org, x, y, n]);
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Steps 1011–1012, 2166: profile of a sweep with a profile family (FamilySymbol @182, 32-bit
+/// @134): the family's own chain (its key in the family body) and its curve elements, in the
+/// profile family's local XY plane.
+fn profile_family_curves(ch: &Chain, chains: &[Chain], byid: &HashMap<u64, &Element>, sweep: u64, bits32: bool) -> Vec<Curve> {
+    let Some(e) = byid.get(&sweep) else { return vec![] };
+    let b = ch.body(e);
+    let off = if bits32 { 134 } else { 182 };
+    if b.len() < off + 8 {
+        return vec![];
+    }
+    let pack = |v: i64| if bits32 { (v as i32).to_le_bytes().to_vec() } else { v.to_le_bytes().to_vec() };
+    let prof = if bits32 { i32_at(b, off) as i64 } else { i64_at(b, off) };
+    let Some(pe) = (prof >= 0).then(|| byid.get(&(prof as u64))).flatten() else { return vec![] };
+    let sb = ch.body(pe);
+    let ft = vtag(ch.version, 1967);
+    let mut fams: Vec<(usize, &Element)> = ch
+        .elements
+        .iter()
+        .filter(|f| f.tag.is_some() && f.tag == ft)
+        .filter_map(|f| find(sb, &pack(f.id as i64)).map(|pos| (pos, f)))
+        .collect();
+    fams.sort_by_key(|(pos, _)| *pos);
+    for (_, f) in fams {
+        let (lo, ln) = f.body;
+        let kid = chains.iter().find(|x| !std::ptr::eq(*x, ch) && x.key.is_some_and(|k| find(&ch.data[lo..lo + ln], &k).is_some()));
+        if let Some(kid) = kid {
+            return crate::curve_elements::curve_elements(kid).into_iter().map(|(_, c)| c).collect();
+        }
+    }
+    vec![]
+}
+
+/// Step 1012: curves from a local XY plane to 3D: P + x·U + y·V (z ignored); spline points are
+/// left as they are, like the reference.
+fn place_curves(curves: &[Curve], p: [f64; 3], u: [f64; 3], v: [f64; 3]) -> Vec<Curve> {
+    let tp = |q: [f64; 3]| [p[0] + q[0] * u[0] + q[1] * v[0], p[1] + q[0] * u[1] + q[1] * v[1], p[2] + q[0] * u[2] + q[1] * v[2]];
+    let td = |d: [f64; 3]| [d[0] * u[0] + d[1] * v[0], d[0] * u[1] + d[1] * v[1], d[0] * u[2] + d[1] * v[2]];
+    curves
+        .iter()
+        .map(|c| {
+            let mut c = c.clone();
+            c.p0 = c.p0.map(tp);
+            c.p1 = c.p1.map(tp);
+            c.center = c.center.map(tp);
+            c.x = c.x.map(td);
+            c.y = c.y.map(td);
+            c
+        })
+        .collect()
+}
+
+fn v3(b: &[u8], o: usize) -> [f64; 3] {
+    [f64_at(b, o), f64_at(b, o + 8), f64_at(b, o + 16)]
 }

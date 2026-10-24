@@ -168,6 +168,21 @@ pub struct Curve {
     /// Zero-length line inside a curve table (step 467).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub degenerate: Option<bool>,
+    /// Spline control points (hermite: points on the curve; nurbs: control points; step 670).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub points: Option<Vec<[f64; 3]>>,
+    /// Hermite tangents and parameters.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tangents: Option<Vec<[f64; 3]>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub params: Option<Vec<f64>>,
+    /// NURBS degree, weights and knots.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degree: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weights: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub knots: Option<Vec<f64>>,
 }
 
 /// Floor or ceiling (§31, steps 383–386, 393, 1323–1324).
