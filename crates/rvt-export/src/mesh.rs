@@ -1354,6 +1354,7 @@ pub fn scene(doc: &Document) -> Scene {
     let mut box_by_cat: std::collections::BTreeMap<i32, usize> = std::collections::BTreeMap::new();
     // step 2227: family shapes per symbol are computed once (many instances share a type)
     let mut shape_cache: std::collections::HashMap<u64, std::rc::Rc<Vec<Vec<[P3; 3]>>>> = std::collections::HashMap::new();
+    let columns: std::collections::HashMap<u64, rvt_model::Column> = doc.columns().into_iter().map(|c| (c.id, c)).collect();
     // step 2230: alternatives per symbol: (shape, local min, local max)
     let mut alt_cache: std::collections::HashMap<u64, std::rc::Rc<Vec<(Vec<[P3; 3]>, P3, P3)>>> = std::collections::HashMap::new();
     // Step 2219: door/window boxes include the swing; clip them to the host wall band instead.
@@ -1367,7 +1368,31 @@ pub fn scene(doc: &Document) -> Scene {
         if e.view.is_some_and(|v| v != -1) {
             continue; // view-specific (annotation)
         }
-        let Some(bb) = e.bbox else { continue };
+        // step 2240: columns have no stored box; build one from the family shape in plan and the
+        // level block (§30.5) in z, so the fit below stretches the shape to the column height
+        let col_bb = || -> Option<[f64; 6]> {
+            let c = columns.get(&i.id)?;
+            let (sym, o, m) = (i.symbol?, i.origin?, i.rotation?);
+            let zb = doc.level_elevation(c.base_level)? + c.base_offset;
+            let zt = doc.level_elevation(c.top_level)? + c.top_offset;
+            let mut local = family_triangles(&solids_of(sym));
+            for sw in sweeps_of(sym) {
+                local.extend(sweep_triangles(sw));
+            }
+            local.extend(blrev_of(sym));
+            let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+            for t in &local {
+                for q in t {
+                    let w = place(o, &m, *q);
+                    for k in 0..2 {
+                        lo[k] = lo[k].min(w[k]);
+                        hi[k] = hi[k].max(w[k]);
+                    }
+                }
+            }
+            (lo[0].is_finite() && zt > zb).then_some([lo[0], lo[1], zb, hi[0], hi[1], zt])
+        };
+        let Some(bb) = e.bbox.or_else(col_bb) else { continue };
         let ext = [bb[3] - bb[0], bb[4] - bb[1], bb[5] - bb[2]];
         if ext.iter().any(|v| !(v.is_finite() && *v >= 0.0 && *v < 1e4)) || ext.iter().all(|v| *v < 1e-6) {
             continue;
@@ -1552,7 +1577,9 @@ pub fn scene(doc: &Document) -> Scene {
                         let keep: [bool; 3] = std::array::from_fn(|k| opening && shi[k] - slo[k] > 1e-6 && factor(k) > 2.0 && (k != 2 || factor(k) > 4.0));
                         let plausible = (0..3).all(|k| {
                             let se = shi[k] - slo[k];
-                            se < 1e-6 || keep[k] || (factor(k) >= 0.05 && factor(k) <= if opening { 4.0 } else { 2.0 })
+                            // step 2240: a column's length is fully parametric (vertical axis free)
+                            let column = matches!(i.cat, -2000100 | -2001330) && k == 2;
+                            se < 1e-6 || keep[k] || (factor(k) >= 0.05 && (column || factor(k) <= if opening { 4.0 } else { 2.0 }))
                         });
                         if !plausible || keep.iter().all(|x| *x) {
                             return None;

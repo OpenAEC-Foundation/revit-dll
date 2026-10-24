@@ -471,6 +471,15 @@ impl Document {
         self.wall_attachments_by_chain().into_iter().flat_map(|(_, _, v)| v).collect()
     }
 
+    /// Columns (§30.5) per project chain: level block and height.
+    pub fn columns_by_chain(&self) -> Vec<(String, usize, Vec<rvt_model::Column>)> {
+        self.project_chains().map(|(p, ch)| (p.stream.clone(), ch.index, instances::columns(ch, &self.level_z))).collect()
+    }
+
+    pub fn columns(&self) -> Vec<rvt_model::Column> {
+        self.columns_by_chain().into_iter().flat_map(|(_, _, v)| v).collect()
+    }
+
     /// Topography surfaces per project chain (step 1532).
     pub fn topography_by_chain(&self) -> Vec<(String, usize, Vec<Topography>)> {
         self.project_chains().map(|(p, ch)| (p.stream.clone(), ch.index, topography::topography(ch))).collect()

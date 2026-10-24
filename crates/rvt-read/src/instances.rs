@@ -316,3 +316,34 @@ pub(crate) fn work_plane_levels(ch: &Chain, insts: &mut [Instance], host_levels:
         }
     }
 }
+
+/// §30.5 (steps 395–397): columns = FamilyInstance (tag 1989) of category −2001330 (structural) or
+/// −2000100. Header §29.2 (base level); level block = the first base level after the header with
+/// −1 at +W+8 and +3W+16: `id base | f64 base offset | id −1 | id top | f64 top offset | id −1`.
+pub(crate) fn columns(ch: &Chain, level_z: &HashMap<i64, f64>) -> Vec<rvt_model::Column> {
+    let (Some(ti), Some(mk)) = (vtag(ch.version, TAG_INSTANCE), crate::hdr_marker(ch)) else { return vec![] };
+    let bits32 = ch.bits == Some(32);
+    let w = if bits32 { 4 } else { 8 };
+    let rd = |b: &[u8], o: usize| if bits32 { i32_at(b, o) as i64 } else { i64_at(b, o) };
+    let mut out = Vec::new();
+    for e in ch.elements.iter().filter(|e| e.tag == Some(ti) && matches!(e.cat, -2001330 | -2000100)) {
+        let bd = ch.body(e);
+        let Some(m) = find(bd, &mk).filter(|m| *m <= 200) else { continue };
+        if m + 10 + 2 * w > bd.len() {
+            continue;
+        }
+        let (sid, lvl) = (rd(bd, m + 10), rd(bd, m + 10 + w));
+        let end = bd.len().saturating_sub(4 * w + 16);
+        let Some(o) = (m + 10 + 2 * w..end).find(|&o| rd(bd, o) == lvl && rd(bd, o + w + 8) == -1 && rd(bd, o + 3 * w + 16) == -1) else { continue };
+        if sid != e.id as i64 {
+            continue;
+        }
+        let (b, bo, t, to) = (rd(bd, o), f64_at(bd, o + w), rd(bd, o + 2 * w + 8), f64_at(bd, o + 3 * w + 8));
+        let height = match (level_z.get(&t), level_z.get(&b)) {
+            (Some(zt), Some(zb)) => Some((zt + to) - (zb + bo)),
+            _ => None,
+        };
+        out.push(rvt_model::Column { id: e.id, cat: e.cat, base_level: b, base_offset: bo, top_level: t, top_offset: to, height });
+    }
+    out
+}

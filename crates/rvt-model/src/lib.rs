@@ -584,3 +584,15 @@ pub struct InplaceMember {
     pub id: u64,
     pub family: i64,
 }
+
+/// Column level block (§30.5): base/top level and offsets; height = level difference with offsets.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Column {
+    pub id: u64,
+    pub cat: i32,
+    pub base_level: i64,
+    pub base_offset: f64,
+    pub top_level: i64,
+    pub top_offset: f64,
+    pub height: Option<f64>,
+}
