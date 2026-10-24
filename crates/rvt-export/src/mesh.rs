@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::f64::consts::PI;
 
-use rvt_model::{Curve, ExtrusionSolid, Instance, Segment, Stair, SweepSolid};
+use rvt_model::{BlendSolid, Curve, ExtrusionSolid, Instance, RevolveSolid, Segment, Stair, SweepSolid};
 use rvt_read::Document;
 
 const FT: f64 = 0.3048;
@@ -411,6 +411,108 @@ fn sweep_triangles(s: &SweepSolid) -> Vec<[P3; 3]> {
     out
 }
 
+/// Closed loop resampled to `m` points at equal arc length.
+fn resample_loop(l: &[P3], m: usize) -> Vec<P3> {
+    let n = l.len();
+    let seg: Vec<f64> = (0..n).map(|i| norm(sub(l[(i + 1) % n], l[i]))).collect();
+    let total: f64 = seg.iter().sum();
+    if total <= 0.0 {
+        return vec![l[0]; m];
+    }
+    let mut out = Vec::with_capacity(m);
+    let (mut i, mut acc) = (0usize, 0.0);
+    for k in 0..m {
+        let target = total * k as f64 / m as f64;
+        while i < n - 1 && acc + seg[i] < target {
+            acc += seg[i];
+            i += 1;
+        }
+        let f = if seg[i] > 0.0 { (target - acc) / seg[i] } else { 0.0 };
+        out.push(add(l[i], mul(sub(l[(i + 1) % n], l[i]), f.clamp(0.0, 1.0))));
+    }
+    out
+}
+
+/// §8.13 (step 2226): blend as a loft between the bottom and top loop (each moved along N by its
+/// offset), both resampled to the same count and aligned (start nearest, same orientation).
+fn blend_triangles(b: &BlendSolid) -> Vec<[P3; 3]> {
+    let n = b.n;
+    let lp = |cs: &[Curve], off: f64| -> Vec<P3> {
+        let mut path = chain_path(cs);
+        if path.len() > 2 && norm(sub(path[0], *path.last().expect("non-empty"))) < 1e-3 {
+            path.pop();
+        }
+        path.into_iter().map(|q| add(q, mul(n, off))).collect()
+    };
+    let (bot, top) = (lp(&b.bottom, b.bottom_offset), lp(&b.top, b.top_offset));
+    if bot.len() < 3 || top.len() < 3 {
+        return vec![];
+    }
+    let u = unit(cross(n, if n[2].abs() < 0.9 { [0.0, 0.0, 1.0] } else { [1.0, 0.0, 0.0] })).unwrap_or([1.0, 0.0, 0.0]);
+    let v = cross(n, u);
+    let area = |l: &[P3]| -> f64 {
+        (0..l.len()).map(|i| { let (a, c) = (l[i], l[(i + 1) % l.len()]); dot(a, u) * dot(c, v) - dot(c, u) * dot(a, v) }).sum::<f64>() / 2.0
+    };
+    let m = bot.len().max(top.len()).clamp(16, 96);
+    let rb = resample_loop(&bot, m);
+    let mut top_l = top.clone();
+    if (area(&bot) > 0.0) != (area(&top_l) > 0.0) {
+        top_l.reverse();
+    }
+    let mut rt = resample_loop(&top_l, m);
+    let shift = (0..m).min_by(|&i, &j| {
+        let di = norm(sub(rt[i], rb[0])) - dot(sub(rt[i], rb[0]), n).abs();
+        let dj = norm(sub(rt[j], rb[0])) - dot(sub(rt[j], rb[0]), n).abs();
+        di.total_cmp(&dj)
+    }).unwrap_or(0);
+    rt.rotate_left(shift);
+    let mut out = Vec::new();
+    for i in 0..m {
+        let j = (i + 1) % m;
+        out.push([rb[i], rb[j], rt[j]]);
+        out.push([rb[i], rt[j], rt[i]]);
+    }
+    for (l, flip) in [(&rb, true), (&rt, false)] {
+        let flat: Vec<f64> = l.iter().flat_map(|q| [dot(*q, u), dot(*q, v)]).collect();
+        if let Ok(tris) = earcutr::earcut(&flat, &[], 2) {
+            for t in tris.chunks_exact(3) {
+                if flip {
+                    out.push([l[t[0]], l[t[2]], l[t[1]]]);
+                } else {
+                    out.push([l[t[0]], l[t[1]], l[t[2]]]);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// §8.14 (step 2226): revolution: every profile segment rotated about the axis A→B from the start
+/// to the end angle in steps of at most 15°.
+fn revolve_triangles(r: &RevolveSolid) -> Vec<[P3; 3]> {
+    let (a, b) = (r.axis[0], r.axis[1]);
+    let Some(k) = unit(sub(b, a)) else { return vec![] };
+    let span = r.end_angle - r.start_angle;
+    if !(span.abs() > 1e-9) {
+        return vec![];
+    }
+    let steps = ((span.abs() / (PI / 12.0)).ceil() as usize).clamp(1, 48);
+    let rot = |q: P3, ang: f64| -> P3 { add(a, rotate(sub(q, a), k, ang)) };
+    let mut out = Vec::new();
+    for c in &r.profile {
+        for sg in sample(c).windows(2) {
+            let (p, q) = (sg[0], sg[1]);
+            for i in 0..steps {
+                let (a0, a1) = (r.start_angle + span * i as f64 / steps as f64, r.start_angle + span * (i + 1) as f64 / steps as f64);
+                let (p0, q0, p1, q1) = (rot(p, a0), rot(q, a0), rot(p, a1), rot(q, a1));
+                out.push([p0, q0, q1]);
+                out.push([p0, q1, p1]);
+            }
+        }
+    }
+    out
+}
+
 /// Triangles of a family's extrusion solids in family (local) coordinates.
 fn family_triangles(solids: &[&ExtrusionSolid]) -> Vec<[P3; 3]> {
     let xf = |p: P3| -> P3 { p };
@@ -787,6 +889,20 @@ pub fn scene(doc: &Document) -> Scene {
             .map(|v| v.iter().filter(|s| s.void != Some(true) && s.host_block.is_none()).collect())
             .unwrap_or_default()
     };
+    let chain_blrev: std::collections::HashMap<(String, usize), (Vec<BlendSolid>, Vec<RevolveSolid>)> =
+        doc.family_blends_revolves_by_chain().into_iter().map(|(st, ix, b, r)| ((st, ix), (b, r))).collect();
+    let blrev_of = |sym: u64| -> Vec<[P3; 3]> {
+        let mut t = Vec::new();
+        if let Some((bl, rv)) = symbol_family.get(&sym).and_then(|f| family_chain.get(f)).and_then(|k| chain_blrev.get(k)) {
+            for b in bl.iter().filter(|b| b.void != Some(true)) {
+                t.extend(blend_triangles(b));
+            }
+            for r in rv.iter().filter(|r| r.void != Some(true)) {
+                t.extend(revolve_triangles(r));
+            }
+        }
+        t
+    };
     let sweeps_of = |sym: u64| -> Vec<&SweepSolid> {
         symbol_family
             .get(&sym)
@@ -825,20 +941,23 @@ pub fn scene(doc: &Document) -> Scene {
         if let (Some(sym), Some(o), Some(m)) = (i.symbol, i.origin, i.rotation) {
             let sol = solids_of(sym);
             let swp = sweeps_of(sym);
-            if !sol.is_empty() || !swp.is_empty() {
-                // step 2224: extrusions plus sweeps first; when a sweep spoils the fit, extrusions alone
+            let br = blrev_of(sym);
+            if !sol.is_empty() || !swp.is_empty() || !br.is_empty() {
+                // step 2224: all forms first; when a sweep spoils the fit, without sweeps; then
+                // extrusions alone
                 let ext_only = family_triangles(&sol);
-                let mut with_sweeps = ext_only.clone();
+                let mut no_sweeps = ext_only.clone();
+                no_sweeps.extend(br.iter().copied());
+                let mut all = no_sweeps.clone();
                 for sw in &swp {
-                    with_sweeps.extend(sweep_triangles(sw));
+                    all.extend(sweep_triangles(sw));
                 }
-                let candidates = if swp.is_empty() {
-                    vec![ext_only]
-                } else if sol.is_empty() {
-                    vec![with_sweeps]
-                } else {
-                    vec![with_sweeps, ext_only]
-                };
+                let mut candidates: Vec<Vec<[P3; 3]>> = Vec::new();
+                for c in [all, no_sweeps, ext_only] {
+                    if !c.is_empty() && !candidates.iter().any(|x| x.len() == c.len()) {
+                        candidates.push(c);
+                    }
+                }
                 for local in candidates {
                 if std::env::var("RVT_MESH_DEBUG").ok().and_then(|v| v.parse::<u64>().ok()) == Some(i.id) {
                     eprintln!("debug {}: {} solids, {} local triangles, bbox {:?}", i.id, sol.len(), local.len(), bb);
