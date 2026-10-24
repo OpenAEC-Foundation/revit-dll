@@ -4,6 +4,7 @@ mod compound;
 mod curve_elements;
 mod curves;
 mod families;
+mod groups;
 mod hosted;
 mod instances;
 mod levels;
@@ -12,13 +13,14 @@ mod railings;
 mod slabs;
 mod solids;
 mod stairs;
+mod topography;
 mod util;
 mod walls;
 
 use std::collections::{HashMap, HashSet};
 
 use rvt_core::{read_partitions, vtag, Cfb, Chain, Element, Partition};
-use rvt_model::{CompoundType, DocumentInfo, ElementInfo, Floor, Instance, LegacyStair, Level, MepSystem, Railing, RailingTypeInfo, Roof, Segment, Stair, Wall};
+use rvt_model::{CompoundType, DocumentInfo, ElementInfo, Floor, Instance, LegacyStair, Level, MepSystem, Railing, RailingTypeInfo, Roof, Segment, Stair, Topography, Wall};
 
 pub use rvt_core::{Error, Result};
 
@@ -414,6 +416,29 @@ impl Document {
             }
         }
         out
+    }
+
+    /// Hidden group type definition copies per chain (step 2233), over every readable chain.
+    pub fn group_definition_members_by_chain(&self) -> Vec<(String, usize, Vec<rvt_model::GroupDefinitionMember>)> {
+        self.partitions
+            .iter()
+            .flat_map(|p| p.chains.iter().filter(|c| c.bits.is_some()).map(move |ch| (p.stream.clone(), ch.index, groups::group_definition_members(ch))))
+            .filter(|(_, _, v)| !v.is_empty())
+            .collect()
+    }
+
+    /// Ids of hidden group type definition copies (not drawn).
+    pub fn group_definition_ids(&self) -> HashSet<u64> {
+        self.group_definition_members_by_chain().into_iter().flat_map(|(_, _, v)| v.into_iter().map(|m| m.id)).collect()
+    }
+
+    /// Topography surfaces per project chain (step 1532).
+    pub fn topography_by_chain(&self) -> Vec<(String, usize, Vec<Topography>)> {
+        self.project_chains().map(|(p, ch)| (p.stream.clone(), ch.index, topography::topography(ch))).collect()
+    }
+
+    pub fn topography(&self) -> Vec<Topography> {
+        self.topography_by_chain().into_iter().flat_map(|(_, _, t)| t).collect()
     }
 
     /// Old sketch-based stairs per project chain (step 1455), with the chain's own levels.

@@ -530,3 +530,19 @@ pub struct LegacyStair {
     pub multistory_top_level: Option<i64>,
     pub multistory_top_z: Option<f64>,
 }
+
+/// Topography surface (step 1532): terrain points (the largest point list) and the lengths of the
+/// other point lists in its body.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Topography {
+    pub id: u64,
+    pub points: Vec<[f64; 3]>,
+    pub other_lists: Vec<usize>,
+}
+
+/// Element that belongs to a group type's hidden definition copy (step 2233).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct GroupDefinitionMember {
+    pub id: u64,
+    pub group_type: i64,
+}

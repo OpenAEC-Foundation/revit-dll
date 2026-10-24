@@ -846,6 +846,22 @@ pub fn scene(doc: &Document) -> Scene {
             }
         }
     }
+    // Topography (step 2233): Delaunay triangulation of the terrain points in plan, like Revit
+    // regenerates the surface from its points.
+    // step 2233: hidden group type definition copies (rac_basic: a second terrain over the same area)
+    let hidden = doc.group_definition_ids();
+    for t in doc.topography().into_iter().filter(|t| !hidden.contains(&t.id)) {
+        let pts: Vec<delaunator::Point> = t.points.iter().map(|p| delaunator::Point { x: p[0], y: p[1] }).collect();
+        let tri = delaunator::triangulate(&pts);
+        if tri.triangles.is_empty() {
+            continue;
+        }
+        let b = batch!("Topography", [0.56, 0.64, 0.44]);
+        for c in tri.triangles.chunks_exact(3) {
+            let (p, q, r) = (t.points[c[0]], t.points[c[1]], t.points[c[2]]);
+            b.tri(p, r, q);
+        }
+    }
     // Old sketch stairs (step 2231): run lines in walking order; the riser lines crossing a run,
     // sorted along it, each start a tread one riser high (rise = level difference / riser lines;
     // the last line of a run is the step onto the landing or floor). Landings: a slab along each

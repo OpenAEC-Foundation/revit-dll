@@ -11,6 +11,7 @@ rvt-model.workspace = true
 rvt-read.workspace = true
 earcutr = "0.5"
 acadrust = { version = "0.6.6", optional = true, default-features = false }
+delaunator = "1"
 
 [features]
 default = ["cad"]

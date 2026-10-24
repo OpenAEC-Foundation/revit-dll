@@ -14,6 +14,8 @@ const USAGE: &str = "usage:
   rvt railings <file.rvt>              railings (path, type, height, level)
   rvt stairs <file.rvt>                component stairs (riser, tread, levels, height, runs)
   rvt legacy_stairs <file.rvt>         old sketch-based stairs (levels, type, sketch lines)
+  rvt topography <file.rvt>            topography surfaces (terrain points)
+  rvt group_definition_members <file>  hidden group type definition copies
   rvt stairs_runs <file.rvt>           stairs runs (width, base and top elevation)
   rvt families <file.rvt>              family document chains and symbol -> family
   rvt solids <file.rvt>                extrusion solids per family chain
@@ -109,6 +111,21 @@ fn run(args: &[String]) -> Result<Value, String> {
             let chains: Vec<Value> =
                 doc.segments_by_chain().into_iter().map(|(s, i, v)| json!({"stream": s, "index": i, "segments": v})).collect();
             Ok(json!({"chains": chains, "systems": doc.systems()}))
+        }
+        "group_definition_members" => {
+            let doc = rvt_read::Document::open(path).map_err(err)?;
+            let chains: Vec<Value> = doc
+                .group_definition_members_by_chain()
+                .into_iter()
+                .map(|(s, i, v)| json!({"stream": s, "index": i, "group_definition_members": v}))
+                .collect();
+            Ok(json!({"chains": chains}))
+        }
+        "topography" => {
+            let doc = rvt_read::Document::open(path).map_err(err)?;
+            let chains: Vec<Value> =
+                doc.topography_by_chain().into_iter().map(|(s, i, v)| json!({"stream": s, "index": i, "topography": v})).collect();
+            Ok(json!({"chains": chains}))
         }
         "legacy_stairs" => {
             let doc = rvt_read::Document::open(path).map_err(err)?;
