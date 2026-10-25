@@ -713,31 +713,35 @@ fn finest_variants<'a>(solids: Vec<&'a ExtrusionSolid>) -> Vec<&'a ExtrusionSoli
 /// I-profile of 16 and one of 12 curves along one path, both drawn = twice the area); keep the
 /// finest (most profile curves).
 fn finest_sweeps<'a>(sweeps: Vec<&'a SweepSolid>) -> Vec<&'a SweepSolid> {
+    // exact: path and plane; within 0.1 ft: the profile bounds (rst channels: a C of 10 curves
+    // y −0.16..0.08 and one of 8 curves y −0.19..0.10 along the same path)
     let key = |s: &SweepSolid| -> Vec<i64> {
-        let pts: Vec<P3> = s.profile.iter().flat_map(|c| c.p0.into_iter().chain(c.p1).chain(c.center)).collect();
+        let path = s.path.iter().flat_map(|c| c.p0.into_iter().chain(c.p1).chain(c.center)).flatten();
+        path.chain(s.x.iter().copied()).chain(s.y.iter().copied()).chain(s.n.iter().copied()).map(|v| (v * 1e4).round() as i64).collect()
+    };
+    let bounds = |s: &SweepSolid| -> [f64; 6] {
         let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
-        for q in &pts {
+        for q in s.profile.iter().flat_map(|c| c.p0.into_iter().chain(c.p1).chain(c.center)) {
             for k in 0..3 {
                 lo[k] = lo[k].min(q[k]);
                 hi[k] = hi[k].max(q[k]);
             }
         }
-        let path = s.path.iter().flat_map(|c| c.p0.into_iter().chain(c.p1).chain(c.center)).flatten();
-        path.chain(s.x.iter().copied()).chain(s.y.iter().copied()).chain(s.n.iter().copied()).chain(lo).chain(hi).map(|v| (v * 1e4).round() as i64).collect()
+        [lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]]
     };
-    let mut best: Vec<(Vec<i64>, &'a SweepSolid)> = Vec::new();
+    let mut best: Vec<(Vec<i64>, [f64; 6], &'a SweepSolid)> = Vec::new();
     for sw in sweeps {
-        let k = key(sw);
-        match best.iter_mut().find(|(bk, _)| *bk == k) {
+        let (k, b) = (key(sw), bounds(sw));
+        match best.iter_mut().find(|(bk, bb, _)| *bk == k && (0..6).all(|i| (bb[i] - b[i]).abs() <= 0.1)) {
             Some(entry) => {
-                if sw.profile.len() > entry.1.profile.len() {
-                    entry.1 = sw;
+                if sw.profile.len() > entry.2.profile.len() {
+                    entry.2 = sw;
                 }
             }
-            None => best.push((k, sw)),
+            None => best.push((k, b, sw)),
         }
     }
-    best.into_iter().map(|(_, sw)| sw).collect()
+    best.into_iter().map(|(_, _, sw)| sw).collect()
 }
 
 /// Triangles of a family's extrusion solids in family (local) coordinates.
@@ -2573,7 +2577,8 @@ pub fn scene(doc: &Document) -> Scene {
                 // about their length: the length is along x, the section is turned); framing is
                 // fitted along such axes, the others keep the family size
                 let aligned: [bool; 3] = std::array::from_fn(|k| [m[k], m[3 + k], m[6 + k]].iter().filter(|v| (v.abs() - 1.0).abs() < 1e-6).count() == 1);
-                let partly = !axis_aligned && i.cat == -2001320 && aligned.iter().any(|a| *a);
+                // (only when the length axis, local x, is one of them: else the brace rule below)
+                let partly = !axis_aligned && i.cat == -2001320 && aligned[0];
                 let fitted: Option<Vec<[P3; 3]>> = (!covers && (axis_aligned || partly) && !world.is_empty() && !linked_hosts.contains(&i.id))
                     .then(|| {
                         // element box in local coordinates (m is a signed permutation: inverse = transpose)
@@ -2637,6 +2642,34 @@ pub fn scene(doc: &Document) -> Scene {
                         Some(local.iter().map(|t| [map(t[0]), map(t[1]), map(t[2])]).collect())
                     })
                     .flatten()
+                    // step 2280: a brace whose length axis (local x) runs diagonally (rst braces in a
+                    // vertical plane, box 0.44 × 9.82 × 10.09 ft): its length is the box extent over the
+                    // direction component, e_k / |d_k|, the smallest over the significant components;
+                    // stretched along local x about the middle of the family's extent (a placed
+                    // brace's origin is its midpoint: rst 1114997 origin = centre of Revit's box)
+                    .or_else(|| {
+                        if covers || i.cat != -2001320 || axis_aligned || aligned[0] {
+                            return None;
+                        }
+                        let d = [m[0], m[3], m[6]];
+                        let ext = [bb[3] - bb[0], bb[4] - bb[1], bb[5] - bb[2]];
+                        let (mut llo, mut lhi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+                        for q in local.iter().flatten() {
+                            for k in 0..3 {
+                                llo[k] = llo[k].min(q[k]);
+                                lhi[k] = lhi[k].max(q[k]);
+                            }
+                        }
+                        // the section (local y, z) adds |M[k][j]|·size_j to the box along world axis k
+                        let sec = |k: usize| (1..3).map(|j| m[3 * k + j].abs() * (lhi[j] - llo[j])).sum::<f64>();
+                        let len = (0..3).filter(|k| d[*k].abs() > 0.3).map(|k| (ext[k] - sec(k)).max(0.0) / d[k].abs()).fold(f64::INFINITY, f64::min);
+                        let (sl, sh) = (llo[0], lhi[0]);
+                        let se = sh - sl;
+                        (len.is_finite() && se > 1e-3 && (0.1..=20.0).contains(&(len / se))).then(|| {
+                            let mid = (sl + sh) / 2.0;
+                            local.iter().map(|t| t.map(|q| place(o, &m, [mid + (q[0] - mid) * len / se, q[1], q[2]]))).collect()
+                        })
+                    })
                     // otherwise the unscaled family shape when it lies inside the stored box
                     .or_else(|| {
                         // step 2245: 0.5 ft margin (rac_basic parking items on the sloped terrain: the
