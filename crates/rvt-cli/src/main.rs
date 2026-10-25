@@ -163,6 +163,11 @@ fn run(args: &[String]) -> Result<Value, String> {
                 doc.mep_curves_by_chain().into_iter().map(|(s, i, v)| json!({"stream": s, "index": i, "mep_curves": v})).collect();
             Ok(json!({"chains": chains}))
         }
+        "stair_run_types" => {
+            let doc = rvt_read::Document::open(path).map_err(err)?;
+            let v: Vec<Value> = doc.stairs().iter().map(|s| json!({"stair": s.id, "run_type": doc.stair_run_type(s.id)})).collect();
+            Ok(json!({"stair_run_types": v}))
+        }
         "wall_sweeps" => {
             let doc = rvt_read::Document::open(path).map_err(err)?;
             Ok(json!({"wall_sweeps": doc.wall_sweeps()}))

@@ -684,3 +684,17 @@ pub struct WallSweep {
     #[serde(skip_serializing)]
     pub segments: Vec<Curve>,
 }
+
+/// Stairs run type (step 2276; StairsRunType, cat −2000919): flags and sizes (API IsMonolithic,
+/// HasTreads, HasRisers, StructuralDepth, TreadThickness, RiserThickness, NosingLength).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct StairRunType {
+    pub id: u64,
+    pub monolithic: bool,
+    pub treads: bool,
+    pub risers: bool,
+    pub structural_depth: f64,
+    pub tread_thickness: f64,
+    pub riser_thickness: f64,
+    pub nosing: f64,
+}

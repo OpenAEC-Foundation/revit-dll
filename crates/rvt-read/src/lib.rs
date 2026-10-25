@@ -251,6 +251,37 @@ impl Document {
             .unwrap_or_default()
     }
 
+    /// Step 2276: the run type of a stair: the stair record's first reference (@150..300) to a
+    /// StairsType (cat −2000120, not the stair), whose first reference to a cat −2000919 record of
+    /// the run-type layout gives it. 64-bit records with the type name at @247 (2025/2026): flags
+    /// @243/@244/@245 = monolithic / treads / risers, f64 @143 structural depth, @159 tread
+    /// thickness, @167 riser thickness, @175 nosing length (API: rac 2026 141730/141746/171672,
+    /// snowdon 2025 1557288).
+    pub fn stair_run_type(&self, stair: u64) -> Option<rvt_model::StairRunType> {
+        let cat = |id: i64| if id > 0 { self.element(id as u64).map(|e| e.category) } else { None };
+        let b = self.element_body(stair)?;
+        let ty = (150..b.len().min(300).saturating_sub(8)).map(|o| util::i64_at(&b, o)).find(|&q| q != stair as i64 && cat(q) == Some(-2000120))?;
+        let tb = self.element_body(ty as u64)?;
+        (150..tb.len().saturating_sub(8)).map(|o| util::i64_at(&tb, o)).filter(|&q| cat(q) == Some(-2000919)).find_map(|q| {
+            let r = self.element_body(q as u64)?;
+            if r.len() < 251 || !(1..=200).contains(&util::u32_at(&r, 247)) || r[243] > 1 || r[244] > 1 || r[245] > 1 {
+                return None;
+            }
+            let f = |o: usize| util::f64_at(&r, o);
+            let ok = |v: f64| v.is_finite() && (0.0..20.0).contains(&v);
+            (ok(f(143)) && ok(f(159)) && ok(f(167)) && ok(f(175))).then(|| rvt_model::StairRunType {
+                id: q as u64,
+                monolithic: r[243] == 1,
+                treads: r[244] == 1,
+                risers: r[245] == 1,
+                structural_depth: f(143),
+                tread_thickness: f(159),
+                riser_thickness: f(167),
+                nosing: f(175),
+            })
+        })
+    }
+
     /// Raw record body of an element (for format analysis).
     pub fn element_body(&self, id: u64) -> Option<Vec<u8>> {
         let &(pi, ci, ei) = self.index.get(&id)?;

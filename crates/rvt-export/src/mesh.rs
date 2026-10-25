@@ -32,6 +32,10 @@ pub struct Scene {
 
 type P3 = [f64; 3];
 
+fn i64_at_le(b: &[u8], o: usize) -> i64 {
+    i64::from_le_bytes(b[o..o + 8].try_into().expect("8 bytes"))
+}
+
 fn view(p: P3) -> [f32; 3] {
     [(p[0] * FT) as f32, (p[2] * FT) as f32, (-p[1] * FT) as f32]
 }
@@ -1196,6 +1200,11 @@ pub fn scene(doc: &Document) -> Scene {
                 }
             }
         }
+        // step 2276: a non-monolithic run (run type: treads, tread thickness) draws its treads as
+        // plates of that thickness and risers only when it has them; a monolithic run keeps blocks
+        let rt = doc.stair_run_type(st.id).filter(|r| !r.monolithic && r.treads && r.tread_thickness > 1e-3 && r.tread_thickness < st.riser);
+        let tread_lo = |z0: f64| rt.as_ref().map_or(z0, |r| z0 + st.riser - r.tread_thickness);
+        let riser_plate = rt.as_ref().filter(|r| r.risers && r.riser_thickness > 1e-3).map(|r| r.riser_thickness);
         let b = batch!("Stairs", [0.70, 0.66, 0.60]);
         let mut k = 0usize;
         for (rid, path) in paths {
@@ -1255,8 +1264,17 @@ pub fn scene(doc: &Document) -> Scene {
                     if area2 < 0.0 {
                         q.reverse();
                     }
-                    let bot = q.map(|v| [v[0], v[1], z0]);
+                    let bot = q.map(|v| [v[0], v[1], tread_lo(z0)]);
                     b.hexa(bot, bot.map(|v| [v[0], v[1], z0 + st.riser]));
+                    if let (Some(rth), true) = (riser_plate, rt.is_some()) {
+                        // riser under the front edge (q[0] → q[3] is the first riser line)
+                        if let Some(dir) = unit(sub(mul(add(q[1], q[2]), 0.5), mul(add(q[0], q[3]), 0.5))) {
+                            let f = |v: P3, z: f64| [v[0], v[1], z];
+                            let (p0, p3) = (q[0], q[3]);
+                            let (p1, p2) = (add(p0, mul(dir, rth)), add(p3, mul(dir, rth)));
+                            b.hexa([f(p0, z0), f(p1, z0), f(p2, z0), f(p3, z0)], [f(p0, tread_lo(z0)), f(p1, tread_lo(z0)), f(p2, tread_lo(z0)), f(p3, tread_lo(z0))]);
+                        }
+                    }
                     k += 1;
                 }
                 continue;
@@ -1287,9 +1305,60 @@ pub fn scene(doc: &Document) -> Scene {
                 let (a, c) = ([a[0], a[1], z0], [c[0], c[1], z0]);
                 let (a0, a1, c0, c1) = (sub(a, w), add(a, w), sub(c, w), add(c, w));
                 let up = [0.0, 0.0, st.riser];
-                b.hexa([a0, c0, c1, a1], [add(a0, up), add(c0, up), add(c1, up), add(a1, up)]);
+                let lo = [0.0, 0.0, tread_lo(z0) - z0];
+                b.hexa([add(a0, lo), add(c0, lo), add(c1, lo), add(a1, lo)], [add(a0, up), add(c0, up), add(c1, up), add(a1, up)]);
+                if let (Some(rth), true) = (riser_plate, rt.is_some()) {
+                    let fwd = mul(dir, rth);
+                    b.hexa([a0, add(a0, fwd), add(a1, fwd), a1], [add(a0, lo), add(add(a0, fwd), lo), add(add(a1, fwd), lo), add(a1, lo)]);
+                }
                 k += 1;
             }
+        }
+    }
+    // Stair supports (step 2276; cat −2000123: stringers, carriages): the elements the stair record
+    // references, each with its stored box, the run it carries (first cat −2000919 reference that is
+    // one of the stair's runs) and its type (first cat −2000123 reference without a box: Structural
+    // Depth On Run f64 @143, API snowdon 'Carriage - 24" Width' 0.333). A beam in the plan box along
+    // its long side, rising from the run's base to its top elevation, the depth measured vertically.
+    for st in &stairs {
+        let Some(sb) = doc.element_body(st.id) else { continue };
+        let refs: Vec<u64> = (150..sb.len().saturating_sub(8)).map(|o| i64_at_le(&sb, o)).filter(|&q| q > 0).map(|q| q as u64).collect();
+        let mut seen = std::collections::HashSet::new();
+        for sup in refs.into_iter().filter(|q| seen.insert(*q)) {
+            let Some(se) = doc.element(sup).filter(|e| e.category == -2000123) else { continue };
+            let Some(bb) = se.bbox.filter(|b| b.iter().all(|v| v.is_finite() && v.abs() < 1e6) && b[3] > b[0] && b[4] > b[1]) else { continue };
+            let Some(body) = doc.element_body(sup) else { continue };
+            let ids: Vec<u64> = (150..body.len().min(400).saturating_sub(8)).map(|o| i64_at_le(&body, o)).filter(|&q| q > 0).map(|q| q as u64).collect();
+            let Some(run) = ids.iter().copied().find(|q| st.runs.contains(q)).and_then(|q| runs.get(&q)) else { continue };
+            let depth = ids
+                .iter()
+                .copied()
+                .filter(|q| doc.element(*q).is_some_and(|e| e.category == -2000123 && e.bbox.is_none()))
+                .find_map(|q| doc.element_body(q).filter(|b| b.len() >= 151).map(|b| f64::from_le_bytes(b[143..151].try_into().unwrap())))
+                .filter(|d| d.is_finite() && *d > 0.01 && *d < 5.0)
+                .unwrap_or(0.5);
+            let (ex, ey) = (bb[3] - bb[0], bb[4] - bb[1]);
+            let along_x = ex >= ey;
+            // low end: the end nearer to the run's start
+            let start = run_paths(st).into_iter().find(|(r, _)| *r == run.id).and_then(|(_, p)| p.first().copied());
+            let (lo_end, hi_end) = if along_x { (bb[0], bb[3]) } else { (bb[1], bb[4]) };
+            let flip = start.is_some_and(|p0| {
+                let c = if along_x { p0[0] } else { p0[1] };
+                (c - hi_end).abs() < (c - lo_end).abs()
+            });
+            // under the treads: from the run's base to one riser below its top (the last riser
+            // lands on the landing or floor)
+            let (z0, z1) = (run.base_elevation, run.top_elevation - st.riser.max(0.0));
+            if !(z1 > z0) {
+                continue;
+            }
+            let (w0, w1) = if along_x { (bb[1], bb[4]) } else { (bb[0], bb[3]) };
+            let pt = |t: f64, w: f64, z: f64| -> P3 { if along_x { [t, w, z] } else { [w, t, z] } };
+            let (ta, tb) = if flip { (hi_end, lo_end) } else { (lo_end, hi_end) };
+            // top line from (ta, z0) to (tb, z1); bottom `depth` lower
+            let bot = [pt(ta, w0, z0 - depth), pt(tb, w0, z1 - depth), pt(tb, w1, z1 - depth), pt(ta, w1, z0 - depth)];
+            let top = [pt(ta, w0, z0), pt(tb, w0, z1), pt(tb, w1, z1), pt(ta, w1, z0)];
+            batch!("Stairs", [0.70, 0.66, 0.60]).hexa(bot, top);
         }
     }
     // Wall sweeps (step 2272; cat −2000181, S719 + segments): per straight segment a rectangular
