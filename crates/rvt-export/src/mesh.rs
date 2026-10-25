@@ -1624,12 +1624,59 @@ pub fn scene(doc: &Document) -> Scene {
             ((st, ix), v)
         })
         .collect();
+    // Step 2268: a form whose Visible is bound to a yes/no family parameter (S2268) is hidden when
+    // that parameter is 0 for the type: the symbol's value (matched by parameter name), else the
+    // family's current value (snowdon door family 439: 'Masonry Frame' 1 / 'Dry Wall Frame' 0,
+    // two frame sweeps; Revit draws one).
+    let vis_assoc: std::collections::HashMap<u64, u64> = doc
+        .family_param_associations()
+        .into_iter()
+        .filter_map(|(id, l)| l.iter().find(|(b, _)| *b == -1006205).map(|(_, f)| (id, *f)))
+        .collect();
+    let sym_rows: std::collections::HashMap<u64, rvt_model::ValueSet> = if vis_assoc.is_empty() {
+        Default::default()
+    } else {
+        doc.type_values_by_chain().into_iter().flat_map(|(_, _, m)| m.into_iter()).collect()
+    };
+    let vis_names = if vis_assoc.is_empty() { Default::default() } else { doc.parameter_names_global() };
+    let hidden_cache: std::cell::RefCell<std::collections::HashMap<((String, usize), Option<u64>), std::rc::Rc<std::collections::HashSet<u64>>>> = Default::default();
+    let hidden_forms = |key: &(String, usize), sym: Option<u64>| -> std::rc::Rc<std::collections::HashSet<u64>> {
+        if let Some(h) = hidden_cache.borrow().get(&(key.clone(), sym)) {
+            return h.clone();
+        }
+        let ids: Vec<(u64, u64)> = chain_solids
+            .get(key)
+            .into_iter()
+            .flatten()
+            .map(|s| s.id)
+            .chain(chain_sweeps.get(key).into_iter().flatten().map(|s| s.id))
+            .filter_map(|id| vis_assoc.get(&id).map(|f| (id, *f)))
+            .collect();
+        let mut hidden = std::collections::HashSet::new();
+        if !ids.is_empty() {
+            let fnames = doc.parameter_names_of(&key.0, key.1);
+            let current = doc.family_current_values(&key.0, key.1);
+            for (id, fp) in ids {
+                let name = fnames.get(&fp).cloned().flatten();
+                let from_type = sym.and_then(|s| sym_rows.get(&s)).and_then(|vs| {
+                    vs.rows.iter().find(|r| r.param > 0 && name.is_some() && vis_names.get(&(r.param as u64)).cloned().flatten() == name).map(|r| r.int)
+                });
+                let value = from_type.or_else(|| current.as_ref().and_then(|c| c.rows.iter().find(|r| r.param == fp as i64).map(|r| r.int)));
+                if value == Some(0) {
+                    hidden.insert(id);
+                }
+            }
+        }
+        let h = std::rc::Rc::new(hidden);
+        hidden_cache.borrow_mut().insert((key.clone(), sym), h.clone());
+        h
+    };
     let solids_of = |sym: u64| -> Vec<&ExtrusionSolid> {
-        symbol_family
-            .get(&sym)
-            .and_then(|f| family_chain.get(f))
-            .and_then(|k| chain_solids.get(k))
-            .map(|v| finest_variants(v.iter().filter(|s| s.void != Some(true) && s.host_block.is_none()).collect()))
+        let Some(k) = symbol_family.get(&sym).and_then(|f| family_chain.get(f)) else { return vec![] };
+        let hid = hidden_forms(k, Some(sym));
+        chain_solids
+            .get(k)
+            .map(|v| finest_variants(v.iter().filter(|s| s.void != Some(true) && s.host_block.is_none() && !hid.contains(&s.id)).collect()))
             .unwrap_or_default()
     };
     // step 2249: columns are never face-based; a column family whose only extrusion carries the
@@ -1668,12 +1715,9 @@ pub fn scene(doc: &Document) -> Scene {
         t
     };
     let sweeps_of = |sym: u64| -> Vec<&SweepSolid> {
-        symbol_family
-            .get(&sym)
-            .and_then(|f| family_chain.get(f))
-            .and_then(|k| chain_sweeps.get(k))
-            .map(|v| v.iter().filter(|s| s.void != Some(true)).collect())
-            .unwrap_or_default()
+        let Some(k) = symbol_family.get(&sym).and_then(|f| family_chain.get(f)) else { return vec![] };
+        let hid = hidden_forms(k, Some(sym));
+        chain_sweeps.get(k).map(|v| v.iter().filter(|s| s.void != Some(true) && !hid.contains(&s.id)).collect()).unwrap_or_default()
     };
     let (mut n_family, mut n_box) = (0usize, 0usize);
     let mut box_by_cat: std::collections::BTreeMap<i32, usize> = std::collections::BTreeMap::new();
@@ -1698,12 +1742,14 @@ pub fn scene(doc: &Document) -> Scene {
     };
     let chain_forms = |key: &(String, usize)| -> Vec<[P3; 3]> {
         let mut t = Vec::new();
+        // step 2268: nested families by their current values
+        let hid = hidden_forms(key, None);
         if let Some(v) = chain_solids.get(key) {
-            let sol: Vec<&ExtrusionSolid> = finest_variants(v.iter().filter(|s| s.void != Some(true) && s.host_block.is_none()).collect());
+            let sol: Vec<&ExtrusionSolid> = finest_variants(v.iter().filter(|s| s.void != Some(true) && s.host_block.is_none() && !hid.contains(&s.id)).collect());
             t.extend(family_triangles(&sol));
         }
         if let Some(v) = chain_sweeps.get(key) {
-            for sw in v.iter().filter(|s| s.void != Some(true)) {
+            for sw in v.iter().filter(|s| s.void != Some(true) && !hid.contains(&s.id)) {
                 t.extend(sweep_triangles(sw));
             }
         }

@@ -609,6 +609,23 @@ impl Document {
             .unwrap_or_default()
     }
 
+    /// Step 2268: parameter associations (built-in parameter → family parameter) of the elements of
+    /// every family chain, e.g. a form's Visible (−1006205) bound to a yes/no family parameter.
+    pub fn family_param_associations(&self) -> HashMap<u64, Vec<(i64, u64)>> {
+        let proj: HashSet<(usize, usize)> = self.project.iter().chain(self.document.iter()).copied().collect();
+        let mut out = HashMap::new();
+        for (pi, p) in self.partitions.iter().enumerate() {
+            for (ci, ch) in p.chains.iter().enumerate() {
+                if ch.bits.is_none() || proj.contains(&(pi, ci)) {
+                    continue;
+                }
+                let prm: HashSet<u64> = params::parameter_names(ch).into_keys().collect();
+                out.extend(params::param_associations(ch, &prm));
+            }
+        }
+        out
+    }
+
     /// Step 2266: current values of a family chain (the type its forms are drawn at), if found.
     pub fn family_current_values(&self, stream: &str, index: usize) -> Option<rvt_model::ValueSet> {
         self.partitions

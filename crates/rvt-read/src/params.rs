@@ -134,21 +134,58 @@ fn value_rows(b: &[u8], p: usize, valid: &dyn Fn(i64) -> bool, w32: bool) -> Opt
         } else if x != 0 {
             return None;
         }
-        let (v, el, pid) = if w32 {
-            let r = (f64_at(b, q), i32_at(b, q + 8) as i64, i32_at(b, q + 12) as i64);
+        let (v, el, pid, iv) = if w32 {
+            let r = (f64_at(b, q), i32_at(b, q + 8) as i64, i32_at(b, q + 12) as i64, i32_at(b, q + 16));
             q += 22;
             r
         } else {
-            let r = (f64_at(b, q), i64_at(b, q + 8), i64_at(b, q + 16));
+            let r = (f64_at(b, q), i64_at(b, q + 8), i64_at(b, q + 16), i32_at(b, q + 24));
             q += 30;
             r
         };
         if !valid(pid) {
             return None;
         }
-        rows.push(ValueRow { param: pid, num: v, elem: el, text: txt });
+        rows.push(ValueRow { param: pid, num: v, elem: el, text: txt, int: iv });
     }
     Some((rows, q))
+}
+
+/// Step 2268: parameter associations of the elements of a family document: `u32 n | n × (i64
+/// family parameter | i64 built-in parameter | i32 −1 | u8 0)` (32-bit: i32 ids), the last such
+/// list in the body (snowdon door family 439: sweep 2162442 → (Frame Material, MATERIAL_ID_PARAM
+/// −1002107), (Dry Wall Frame, IS_VISIBLE_PARAM −1006205); API GetAssociatedFamilyParameter idem).
+pub(crate) fn param_associations(ch: &Chain, params: &HashSet<u64>) -> HashMap<u64, Vec<(i64, u64)>> {
+    let w32 = ch.bits == Some(32);
+    let (w, ent) = if w32 { (4, 13) } else { (8, 21) };
+    let rd = |b: &[u8], o: usize| if w32 { i32_at(b, o) as i64 } else { i64_at(b, o) };
+    let mut out = HashMap::new();
+    for e in &ch.elements {
+        let b = ch.body(e);
+        let l = b.len();
+        let mut last = None;
+        for o in 0..l.saturating_sub(4 + ent) {
+            let n = u32_at(b, o) as usize;
+            if !(1..=32).contains(&n) || o + 4 + n * ent > l {
+                continue;
+            }
+            let list: Option<Vec<(i64, u64)>> = (0..n)
+                .map(|k| {
+                    let q = o + 4 + k * ent;
+                    let (fp, bp) = (rd(b, q), rd(b, q + w));
+                    (fp > 0 && params.contains(&(fp as u64)) && (-3_000_000 < bp && bp < -1_000_000) && i32_at(b, q + 2 * w) == -1 && b[q + 2 * w + 4] == 0)
+                        .then_some((bp, fp as u64))
+                })
+                .collect();
+            if let Some(v) = list {
+                last = Some(v);
+            }
+        }
+        if let Some(v) = last {
+            out.insert(e.id, v);
+        }
+    }
+    out
 }
 
 /// Step 2266: the current values of a family document: in its Family (1967) record, before the

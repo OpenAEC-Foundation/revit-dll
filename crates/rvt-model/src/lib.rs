@@ -654,6 +654,9 @@ pub struct ValueRow {
     pub num: f64,
     pub elem: i64,
     pub text: String,
+    /// Integer value (yes/no, integer parameters), the i32 after the parameter id (step 2268).
+    #[serde(skip_serializing)]
+    pub int: i32,
 }
 
 /// Value set of a Family or FamilySymbol body (§9.2): the type values.
