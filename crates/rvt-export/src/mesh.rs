@@ -708,6 +708,38 @@ fn finest_variants<'a>(solids: Vec<&'a ExtrusionSolid>) -> Vec<&'a ExtrusionSoli
     best.into_iter().map(|(_, sld)| sld).collect()
 }
 
+/// Step 2279: detail-level variants of sweeps, like `finest_variants`: sweeps along the same path
+/// with the same plane and profile bounds are one form per detail level (rst steel beams: an
+/// I-profile of 16 and one of 12 curves along one path, both drawn = twice the area); keep the
+/// finest (most profile curves).
+fn finest_sweeps<'a>(sweeps: Vec<&'a SweepSolid>) -> Vec<&'a SweepSolid> {
+    let key = |s: &SweepSolid| -> Vec<i64> {
+        let pts: Vec<P3> = s.profile.iter().flat_map(|c| c.p0.into_iter().chain(c.p1).chain(c.center)).collect();
+        let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+        for q in &pts {
+            for k in 0..3 {
+                lo[k] = lo[k].min(q[k]);
+                hi[k] = hi[k].max(q[k]);
+            }
+        }
+        let path = s.path.iter().flat_map(|c| c.p0.into_iter().chain(c.p1).chain(c.center)).flatten();
+        path.chain(s.x.iter().copied()).chain(s.y.iter().copied()).chain(s.n.iter().copied()).chain(lo).chain(hi).map(|v| (v * 1e4).round() as i64).collect()
+    };
+    let mut best: Vec<(Vec<i64>, &'a SweepSolid)> = Vec::new();
+    for sw in sweeps {
+        let k = key(sw);
+        match best.iter_mut().find(|(bk, _)| *bk == k) {
+            Some(entry) => {
+                if sw.profile.len() > entry.1.profile.len() {
+                    entry.1 = sw;
+                }
+            }
+            None => best.push((k, sw)),
+        }
+    }
+    best.into_iter().map(|(_, sw)| sw).collect()
+}
+
 /// Triangles of a family's extrusion solids in family (local) coordinates.
 fn family_triangles(solids: &[&ExtrusionSolid]) -> Vec<[P3; 3]> {
     let xf = |p: P3| -> P3 { p };
@@ -1906,7 +1938,7 @@ pub fn scene(doc: &Document) -> Scene {
     let sweeps_of = |sym: u64| -> Vec<&SweepSolid> {
         let Some(k) = symbol_family.get(&sym).and_then(|f| family_chain.get(f)) else { return vec![] };
         let hid = hidden_forms(k, Some(sym));
-        chain_sweeps.get(k).map(|v| v.iter().filter(|s| s.void != Some(true) && !hid.contains(&s.id)).collect()).unwrap_or_default()
+        chain_sweeps.get(k).map(|v| finest_sweeps(v.iter().filter(|s| s.void != Some(true) && !hid.contains(&s.id)).collect())).unwrap_or_default()
     };
     let (mut n_family, mut n_box) = (0usize, 0usize);
     let mut box_by_cat: std::collections::BTreeMap<i32, usize> = std::collections::BTreeMap::new();
@@ -1938,7 +1970,7 @@ pub fn scene(doc: &Document) -> Scene {
             t.extend(family_triangles(&sol));
         }
         if let Some(v) = chain_sweeps.get(key) {
-            for sw in v.iter().filter(|s| s.void != Some(true) && !hid.contains(&s.id)) {
+            for sw in finest_sweeps(v.iter().filter(|s| s.void != Some(true) && !hid.contains(&s.id)).collect()) {
                 t.extend(sweep_triangles(sw));
             }
         }
@@ -2537,7 +2569,12 @@ pub fn scene(doc: &Document) -> Scene {
                 // parameters). When the rotation is axis-aligned, fit the family shape per local axis
                 // to the element's stored box instead of falling back to the box.
                 let axis_aligned = m.iter().all(|v| v.abs() < 1e-6 || (v.abs() - 1.0).abs() < 1e-6);
-                let fitted: Option<Vec<[P3; 3]>> = (!covers && axis_aligned && !world.is_empty() && !linked_hosts.contains(&i.id))
+                // step 2279: a local axis whose world image is a world axis (rst braces rolled 45°
+                // about their length: the length is along x, the section is turned); framing is
+                // fitted along such axes, the others keep the family size
+                let aligned: [bool; 3] = std::array::from_fn(|k| [m[k], m[3 + k], m[6 + k]].iter().filter(|v| (v.abs() - 1.0).abs() < 1e-6).count() == 1);
+                let partly = !axis_aligned && i.cat == -2001320 && aligned.iter().any(|a| *a);
+                let fitted: Option<Vec<[P3; 3]>> = (!covers && (axis_aligned || partly) && !world.is_empty() && !linked_hosts.contains(&i.id))
                     .then(|| {
                         // element box in local coordinates (m is a signed permutation: inverse = transpose)
                         let inv = |w: P3| -> P3 {
@@ -2569,7 +2606,8 @@ pub fn scene(doc: &Document) -> Scene {
                         let keep: [bool; 3] = std::array::from_fn(|k| {
                             // step 2255: structural framing stretches freely (its length follows the
                             // beam, its profile the stored box)
-                            shi[k] - slo[k] > 1e-6
+                            (partly && !aligned[k] && shi[k] - slo[k] > 1e-6)
+                                || shi[k] - slo[k] > 1e-6
                                 && i.cat != -2001320
                                 && if opening { factor(k) > 2.0 && (k != 2 || factor(k) > 4.0) } else { factor(k) > 2.0 && !(matches!(i.cat, -2000100 | -2001330) && k == 2) }
                         });
