@@ -90,8 +90,18 @@ impl Batch {
         self.tri(a, c, d);
     }
 
-    /// Box from 8 corners: bottom a b c d (counter-clockwise seen from above), top e f g h.
+    /// Box from 8 corners: bottom a b c d, top e f g h (top[i] above bottom[i]). Step 2274: the
+    /// corners may run either way round; the faces are made to point outward (seen from the top the
+    /// bottom must run counter-clockwise; callers laid boxes along a direction with a normal of
+    /// either sign: snowdon wall sweeps and some treads were inside out).
     fn hexa(&mut self, bottom: [P3; 4], top: [P3; 4]) {
+        let (mut bottom, mut top) = (bottom, top);
+        let nb = cross(sub(bottom[1], bottom[0]), sub(bottom[2], bottom[0]));
+        let up = sub(mul(add(add(top[0], top[1]), add(top[2], top[3])), 0.25), mul(add(add(bottom[0], bottom[1]), add(bottom[2], bottom[3])), 0.25));
+        if dot(nb, up) < 0.0 {
+            bottom.reverse();
+            top.reverse();
+        }
         let [a, b, c, d] = bottom;
         let [e, f, g, h] = top;
         self.quad(a, d, c, b);
@@ -559,7 +569,7 @@ fn sweep_triangles(s: &SweepSolid) -> Vec<[P3; 3]> {
             }
         }
     }
-    out
+    outward(out)
 }
 
 /// Closed loop resampled to `m` points at equal arc length.
@@ -635,7 +645,7 @@ fn blend_triangles(b: &BlendSolid) -> Vec<[P3; 3]> {
             }
         }
     }
-    out
+    outward(out)
 }
 
 /// §8.14 (step 2226): revolution: every profile segment rotated about the axis A→B from the start
@@ -661,7 +671,7 @@ fn revolve_triangles(r: &RevolveSolid) -> Vec<[P3; 3]> {
             }
         }
     }
-    out
+    outward(out)
 }
 
 /// Step 2254: detail-level variants. Extrusions with the same plane, origin, range and profile
@@ -699,6 +709,7 @@ fn family_triangles(solids: &[&ExtrusionSolid]) -> Vec<[P3; 3]> {
     let xf = |p: P3| -> P3 { p };
     let mut out = Vec::new();
     for s in solids {
+        let mut out_all = std::mem::take(&mut out);
         let to2 = |p: P3| -> P3 {
             let d = sub(p, s.o);
             [dot(d, s.x), dot(d, s.y), 0.0]
@@ -740,8 +751,29 @@ fn family_triangles(solids: &[&ExtrusionSolid]) -> Vec<[P3; 3]> {
                 }
             }
         }
+        // step 2274: each solid outward (a clockwise profile or a negative depth turned it inside out)
+        out_all.extend(outward(std::mem::take(&mut out)));
+        out = out_all;
     }
     out
+}
+
+/// Step 2274: the triangles of one closed solid with outward faces: reversed when their signed
+/// volume about their centroid is negative (snowdon columns, fixtures were inside out).
+fn outward(mut t: Vec<[P3; 3]>) -> Vec<[P3; 3]> {
+    if t.is_empty() {
+        return t;
+    }
+    let n = (t.len() * 3) as f64;
+    let c = t.iter().flatten().fold([0.0; 3], |a, p| add(a, *p));
+    let c = mul(c, 1.0 / n);
+    let vol: f64 = t.iter().map(|tr| dot(sub(tr[0], c), cross(sub(tr[1], c), sub(tr[2], c)))).sum();
+    if vol < 0.0 {
+        for tr in t.iter_mut() {
+            tr.swap(1, 2);
+        }
+    }
+    t
 }
 
 /// Walking surface of an old sketch stair (step 2232): a run's nosing line or a landing strip from
@@ -1146,9 +1178,27 @@ pub fn scene(doc: &Document) -> Scene {
         if !(st.riser > 0.0 && st.tread > 0.0) {
             continue;
         }
+        // step 2274: a single run without path geometry (snowdon 2120094: run 2234674 has neither
+        // path lines nor a cached path) walks along the long side of the stair's stored box when
+        // that box is the run (long side = risers × tread or one tread less, short side = width)
+        let mut paths = run_paths(st);
+        if paths.is_empty() && st.runs.len() == 1 {
+            let width = runs.get(&st.runs[0]).map(|r| r.width).filter(|w| *w > 0.0);
+            if let (Some(bb), Some(w)) = (doc.element(st.id).and_then(|e| e.bbox), width) {
+                let (ex, ey) = (bb[3] - bb[0], bb[4] - bb[1]);
+                let (long, short, along_x) = if ex >= ey { (ex, ey, true) } else { (ey, ex, false) };
+                let near = |a: f64, b: f64| (a - b).abs() <= 0.15 * b.max(1e-6);
+                let n = st.risers.max(1) as f64;
+                if (near(long, n * st.tread) || near(long, (n - 1.0) * st.tread)) && (short - w).abs() < 0.5 {
+                    let (cx, cy) = ((bb[0] + bb[3]) / 2.0, (bb[1] + bb[4]) / 2.0);
+                    let path = if along_x { vec![[bb[0], cy, zb], [bb[3], cy, zb]] } else { vec![[cx, bb[1], zb], [cx, bb[4], zb]] };
+                    paths.push((st.runs[0], path));
+                }
+            }
+        }
         let b = batch!("Stairs", [0.70, 0.66, 0.60]);
         let mut k = 0usize;
-        for (rid, path) in run_paths(st) {
+        for (rid, path) in paths {
             let run = runs.get(&rid).filter(|r| r.width > 0.0 && r.width < 50.0 && r.base_elevation.is_finite());
             let half = run.map_or(1.5, |r| r.width / 2.0);
             if let Some(r) = run {
