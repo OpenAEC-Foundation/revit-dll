@@ -32,6 +32,57 @@ pub struct Scene {
 
 type P3 = [f64; 3];
 
+/// Step 2282: adaptive placement points of an instance record, in the instance frame: a u32
+/// count n, then n × (u32 tag, 3×3 rotation, origin) = 100 bytes each, every rotation orthonormal.
+fn adaptive_points(b: &[u8]) -> Vec<P3> {
+    let f = |o: usize| f64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+    let frame_ok = |o: usize| -> bool {
+        let m: Vec<f64> = (0..9).map(|k| f(o + 8 * k)).collect();
+        let row = |r: usize| (m[3 * r] * m[3 * r] + m[3 * r + 1] * m[3 * r + 1] + m[3 * r + 2] * m[3 * r + 2] - 1.0).abs() < 1e-4;
+        let mm: [f64; 9] = m.clone().try_into().unwrap();
+        m.iter().all(|v| v.is_finite()) && (0..3).all(row) && (det3(&mm) - 1.0).abs() < 1e-4 && (0..3).all(|k| f(o + 72 + 8 * k).abs() < 1e5)
+    };
+    for o in 200..b.len().saturating_sub(108) {
+        let n = u32::from_le_bytes(b[o..o + 4].try_into().unwrap()) as usize;
+        if !(2..=32).contains(&n) || o + 4 + n * 100 > b.len() {
+            continue;
+        }
+        if (0..n).all(|k| frame_ok(o + 8 + k * 100)) {
+            return (0..n).map(|k| {
+                let q = o + 8 + k * 100 + 72;
+                [f(q), f(q + 8), f(q + 16)]
+            }).collect();
+        }
+    }
+    Vec::new()
+}
+
+/// Step 2282: a sheet under a Catmull-Rom curve through `pts` (it passes through each point), its
+/// lower edge `drop[k]` below point k (negative = down). A surface form: Revit's strut has one face
+/// (all GT normals to one side, 0.76 m²), a plate of 'Thickness' drew twice that.
+fn adaptive_rib(b: &mut Batch, pts: &[P3], drop: &[f64]) {
+    let n = pts.len();
+    let at = |k: isize| pts[k.clamp(0, n as isize - 1) as usize];
+    let dz = |k: isize| drop[k.clamp(0, n as isize - 1) as usize];
+    let cr = |a: f64, b: f64, c: f64, d: f64, t: f64| 0.5 * (2.0 * b + (c - a) * t + (2.0 * a - 5.0 * b + 4.0 * c - d) * t * t + (3.0 * b - a - 3.0 * c + d) * t * t * t);
+    let mut samples: Vec<(P3, f64)> = Vec::new();
+    for k in 0..n as isize - 1 {
+        let steps = if n > 2 { 8 } else { 1 };
+        for s in 0..steps {
+            let t = s as f64 / steps as f64;
+            let (p0, p1, p2, p3) = (at(k - 1), at(k), at(k + 1), at(k + 2));
+            let p = [0, 1, 2].map(|j| cr(p0[j], p1[j], p2[j], p3[j], t));
+            samples.push((p, dz(k) + (dz(k + 1) - dz(k)) * t));
+        }
+    }
+    samples.push((pts[n - 1], drop[n - 1]));
+    for w in samples.windows(2) {
+        let ((a, da), (c, dc)) = (w[0], w[1]);
+        let low = |p: P3, d: f64| [p[0], p[1], p[2] + d];
+        b.quad(a, c, low(c, dc), low(a, da));
+    }
+}
+
 fn i64_at_le(b: &[u8], o: usize) -> i64 {
     i64::from_le_bytes(b[o..o + 8].try_into().expect("8 bytes"))
 }
@@ -2212,6 +2263,40 @@ pub fn scene(doc: &Document) -> Scene {
         let Some(e) = doc.element(i.id) else { continue };
         if e.view.is_some_and(|v| v != -1) {
             continue; // view-specific (annotation)
+        }
+        if i.symbol.and_then(|s| symbol_family.get(&s)).and_then(|f| family_chain.get(f)).is_some_and(|k| adaptive_chains.contains(k)) {
+            // step 2282: an adaptive component: the placement points are in the instance record
+            // (u32 count, then per point u32 tag + 3×3 + origin in the instance frame); Revit's rib
+            // runs through them (snowdon strut 2220524: 4 points, GT vertices at points 1 and 4
+            // exactly, its lower edge 'Z Point k' below point k, else 'Thickness'). A sheet under a
+            // curve through the points; the frame without the flip of step 2257.
+            let raw = i.rotation.map(|mut m| {
+                if i.hand_flipped != i.facing_flipped {
+                    for k in [1, 4, 7] {
+                        m[k] = -m[k];
+                    }
+                }
+                m
+            });
+            if let (Some(o), Some(m), Some(body)) = (i.origin, raw, doc.element_body(i.id)) {
+                let pts: Vec<P3> = adaptive_points(&body).into_iter().map(|q| place(o, &m, q)).collect();
+                if pts.len() >= 2 {
+                    let named = |want: &str| -> Option<f64> {
+                        (16..body.len().saturating_sub(8)).find_map(|q| {
+                            let pid = i64_at_le(&body, q);
+                            (pid > 0 && global_names.get(&(pid as u64)).cloned().flatten().is_some_and(|n| n == want))
+                                .then(|| f64::from_le_bytes(body[q - 16..q - 8].try_into().unwrap()))
+                                .filter(|v| v.is_finite() && v.abs() < 100.0)
+                        })
+                    };
+                    let th = named("Thickness").filter(|v| *v > 1e-3).unwrap_or(0.125);
+                    let drop: Vec<f64> = (1..=pts.len()).map(|k| named(&format!("Z Point {k}")).unwrap_or(-th)).collect();
+                    let (name, color) = instance_batch(i.cat);
+                    adaptive_rib(batch!(name, color), &pts, &drop);
+                    n_family += 1;
+                    continue;
+                }
+            }
         }
         // step 2243: masses are hidden in views unless 'Show Mass' is on (rac_basic: in-place mass
         // 'water', 180 m2 not in Revit's view)
