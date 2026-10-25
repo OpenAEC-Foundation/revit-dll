@@ -252,3 +252,57 @@ pub(crate) fn wall_attachments(ch: &Chain) -> Vec<rvt_model::WallAttachment> {
     }
     out
 }
+
+const TAG_WALL_SWEEP: u16 = 4520;
+
+/// Step 719 (port, step 2271): wall sweeps and reveals (cat −2000181 / −2000182, tag 4520), bodies
+/// of at least 400 B. Path = the first line/arc block in the last 200 B, else the first from @300
+/// (blocks with header byte 04/24 and no denormal coordinates, step 1406). 64-bit: host = first
+/// wall id, Distance f64 @136, type i64 @205 (@207 after `08 0d`, or when @205 is no id; after
+/// `ff ff` @209/@213, step 1884) when it is an element id or −1. 32-bit (step 1535): host = first
+/// i32 wall id, type = first i32 that is a sweep type (same category, other tag) or any element.
+pub(crate) fn wall_sweeps(ch: &Chain, is_element: &dyn Fn(i64) -> bool) -> Vec<rvt_model::WallSweep> {
+    let Some(tag) = vtag(ch.version, TAG_WALL_SWEEP) else { return vec![] };
+    let walls: HashSet<i64> = ch.elements.iter().filter(|e| matches!(e.cat, -2000011 | -2003500)).map(|e| e.id as i64).collect();
+    let ids: HashSet<i64> = ch.elements.iter().map(|e| e.id as i64).collect();
+    let bits32 = ch.bits == Some(32);
+    let mut out = Vec::new();
+    for e in ch.elements.iter().filter(|e| matches!(e.cat, -2000181 | -2000182) && e.tag == Some(tag)) {
+        let bd = ch.body(e);
+        let l = bd.len();
+        if l < 400 {
+            continue;
+        }
+        let ok = |i: usize| i + 8 < l && matches!(bd[i + 8], 0x04 | 0x24);
+        let line_or_arc = |i: usize| -> Option<Block> {
+            if !ok(i) {
+                return None;
+            }
+            nodenorm(block(bd, i)).filter(|b| matches!(b, Block::Line { .. } | Block::Arc { .. }))
+        };
+        let path = (l.saturating_sub(200)..l.saturating_sub(40)).find_map(line_or_arc).or_else(|| (300..l.saturating_sub(40)).find_map(line_or_arc)).map(|b| b.to_curve(0));
+        if bits32 {
+            let tys: HashSet<i64> = ch.elements.iter().filter(|x| x.cat == e.cat && x.tag != e.tag).map(|x| x.id as i64).collect();
+            let hosts: Vec<i64> = (0..l.saturating_sub(3)).map(|o| i32_at(bd, o) as i64).find(|q| walls.contains(q)).into_iter().collect();
+            let ty = (0..l.saturating_sub(3)).map(|o| i32_at(bd, o) as i64).find(|q| tys.contains(q) || is_element(*q));
+            out.push(rvt_model::WallSweep { id: e.id, cat: e.cat, sweep_type: ty, distance: None, hosts, path });
+            continue;
+        }
+        let valid = |t: i64| ids.contains(&t) || t == -1 || is_element(t);
+        let hosts: Vec<i64> = (0..l.saturating_sub(7)).map(|o| i64_at(bd, o)).find(|q| walls.contains(q)).into_iter().collect();
+        let mut t = i64_at(bd, if bd[205..207] == [0x08, 0x0d] { 207 } else { 205 });
+        if !valid(t) && l >= 215 {
+            let t207 = i64_at(bd, 207);
+            if valid(t207) {
+                t = t207;
+            }
+        }
+        if !valid(t) && bd[205..207] == [0xff, 0xff] {
+            if let Some(q) = [209usize, 213].iter().filter(|&&o| o + 8 <= l).map(|&o| i64_at(bd, o)).find(|&q| q != e.id as i64 && (ids.contains(&q) || is_element(q))) {
+                t = q;
+            }
+        }
+        out.push(rvt_model::WallSweep { id: e.id, cat: e.cat, sweep_type: valid(t).then_some(t), distance: Some(f64_at(bd, 136)), hosts, path });
+    }
+    out
+}

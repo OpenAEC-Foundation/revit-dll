@@ -16,6 +16,7 @@ const USAGE: &str = "usage:
   rvt legacy_stairs <file.rvt>         old sketch-based stairs (levels, type, sketch lines)
   rvt topography <file.rvt>            topography surfaces (terrain points)
   rvt type_values <file.rvt>           type values (value sets) per symbol
+  rvt wall_sweeps <file.rvt>           wall sweeps and reveals (type, distance, host, path)
   rvt flex|mep_curves <file.rvt>       flex ducts; pipes, trays, conduits, flex pipes
   rvt columns <file.rvt>               columns: level block and height
   rvt inplace_members <file.rvt>       content of in-place families
@@ -161,6 +162,10 @@ fn run(args: &[String]) -> Result<Value, String> {
             let chains: Vec<Value> =
                 doc.mep_curves_by_chain().into_iter().map(|(s, i, v)| json!({"stream": s, "index": i, "mep_curves": v})).collect();
             Ok(json!({"chains": chains}))
+        }
+        "wall_sweeps" => {
+            let doc = rvt_read::Document::open(path).map_err(err)?;
+            Ok(json!({"wall_sweeps": doc.wall_sweeps()}))
         }
         "type_values" => {
             let doc = rvt_read::Document::open(path).map_err(err)?;

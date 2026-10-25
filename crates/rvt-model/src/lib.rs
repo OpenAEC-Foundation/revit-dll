@@ -667,3 +667,16 @@ pub struct ValueSet {
     pub type_name: String,
     pub rows: Vec<ValueRow>,
 }
+
+/// Wall sweep or reveal (step 719; cat −2000181 / −2000182): type, Distance, host wall and the
+/// path block (step 2271: Rust port of rvtread `wall_sweeps`).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct WallSweep {
+    pub id: u64,
+    pub cat: i32,
+    #[serde(rename = "type")]
+    pub sweep_type: Option<i64>,
+    pub distance: Option<f64>,
+    pub hosts: Vec<i64>,
+    pub path: Option<Curve>,
+}

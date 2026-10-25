@@ -324,6 +324,12 @@ impl Document {
         out
     }
 
+    /// Step 2271: wall sweeps and reveals of every project chain (port of rvtread `wall_sweeps`).
+    pub fn wall_sweeps(&self) -> Vec<rvt_model::WallSweep> {
+        let is_element = |id: i64| id > 0 && self.index.contains_key(&(id as u64));
+        self.project_chains().flat_map(|(_, ch)| walls::wall_sweeps(ch, &is_element)).collect()
+    }
+
     /// Walls per project chain, keyed by (partition stream, chain index).
     pub fn walls_by_chain(&self) -> Vec<(String, usize, Vec<Wall>)> {
         let ctx = walls::WallContext { level_z: &self.level_z, wall_types: &self.wall_types, phases: &self.phases };
