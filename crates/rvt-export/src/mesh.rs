@@ -2300,7 +2300,8 @@ pub fn scene(doc: &Document) -> Scene {
         // A stored box that is large in all three directions (> 3 m) covers more than the family
         // itself (site, massing or nested content); drawing it hides the building.
         // step 2256: structural foundations (pile caps with piles) may be large in every direction
-        if ext.iter().all(|v| *v * FT > 3.0) && i.cat != -2001300 {
+        // step 2278: planting and entourage may be large too (snowdon trees 15 x 16 x 18 ft)
+        if ext.iter().all(|v| *v * FT > 3.0) && !matches!(i.cat, -2001300 | -2001360 | -2001370) {
             continue;
         }
         if matches!(i.cat, -2000170 | -2000171) && ext.iter().filter(|v| **v * FT > 3.0).count() >= 2 {
