@@ -2587,6 +2587,51 @@ pub fn scene(doc: &Document) -> Scene {
         batch!(name, color).aabb(bb);
     }
 
+    // Step 2273: a member of a multistory stair serves every identical storey above it up to the next
+    // member (snowdon: 621690 18.8 -> 32.2 ft, the next member at 45.5; Revit draws it twice, its
+    // stored box spans 18.8..45.8). When the stored box spans n ≥ 2 times the stair's height, its
+    // first storey (stairs, landings, railings in its plan box) is repeated n − 1 times.
+    for st in stairs.iter() {
+        let (Some(zb), Some(h)) = (st.base_z, Some(st.height).filter(|h| *h > 1.0)) else { continue };
+        let Some(bb) = doc.element(st.id).and_then(|e| e.bbox) else { continue };
+        let n = ((bb[5] - zb) / h).round();
+        if !(2.0..=20.0).contains(&n) {
+            continue;
+        }
+        let (lo, hi) = ([bb[0] - 0.1, bb[1] - 0.1, zb - 0.1], [bb[3] + 0.1, bb[4] + 0.1, zb + h + 3.6]);
+        for name in ["Stairs", "Railings"] {
+            let Some(b) = batches.get_mut(name) else { continue };
+            let p = |b: &Batch, i: u32| -> P3 {
+                let k = i as usize * 3;
+                // view (x, z, −y) in metres -> model feet
+                [b.positions[k] as f64 / FT, -(b.positions[k + 2] as f64) / FT, b.positions[k + 1] as f64 / FT]
+            };
+            let picked: Vec<[u32; 3]> = b
+                .indices
+                .chunks_exact(3)
+                .map(|t| [t[0], t[1], t[2]])
+                .filter(|t| {
+                    let c = mul(add(add(p(b, t[0]), p(b, t[1])), p(b, t[2])), 1.0 / 3.0);
+                    (0..3).all(|k| c[k] >= lo[k] && c[k] <= hi[k])
+                })
+                .collect();
+            for j in 1..n as usize {
+                let dz = (h * j as f64 * FT) as f32;
+                for t in &picked {
+                    let base = (b.positions.len() / 3) as u32;
+                    for &i in t {
+                        let k = i as usize * 3;
+                        let (x, y, z) = (b.positions[k], b.positions[k + 1] + dz, b.positions[k + 2]);
+                        let (nx, ny, nz) = (b.normals[k], b.normals[k + 1], b.normals[k + 2]);
+                        b.positions.extend_from_slice(&[x, y, z]);
+                        b.normals.extend_from_slice(&[nx, ny, nz]);
+                    }
+                    b.indices.extend_from_slice(&[base, base + 1, base + 2]);
+                }
+            }
+        }
+    }
+
     if std::env::var_os("RVT_MESH_STATS").is_some() {
         eprintln!("instances: {n_family} with family geometry, {n_box} as box");
         let mut v: Vec<_> = box_by_cat.iter().collect();
