@@ -1824,6 +1824,8 @@ pub fn scene(doc: &Document) -> Scene {
     // they cover the element's stored box (±0.15 ft); otherwise the box itself.
     let symbol_family = doc.symbol_family();
     let family_chain = doc.family_chains();
+    let adaptive_chains: std::collections::HashSet<(String, usize)> =
+        doc.elements().filter(|e| e.category == -2000710).map(|e| (e.partition, e.chain)).collect();
     // Step 2258: a family document's group type keeps hidden definition copies of its members (header
     // slot = the GroupType, as in projects, step 2233); rac_basic 2026 solar panel: an arrayed cell's
     // copy 4 ft beside the panel. Those forms are not drawn.
@@ -2704,6 +2706,13 @@ pub fn scene(doc: &Document) -> Scene {
                 }
                 }
             }
+        }
+        // step 2281: an adaptive component (its family has adaptive points, cat −2000710) without
+        // readable forms: its stored box also holds the reference points and says neither the
+        // direction nor the size of the form (snowdon canopy struts: box 16.5 × 9.1 × 13.2 ft,
+        // Revit's rod 8.8 × 2.9 × 7 ft, 0.7 m²); no box is less wrong than a slab
+        if i.symbol.and_then(|s| symbol_family.get(&s)).and_then(|f| family_chain.get(f)).is_some_and(|k| adaptive_chains.contains(k)) {
+            continue;
         }
         n_box += 1;
         *box_by_cat.entry(i.cat).or_default() += 1;
