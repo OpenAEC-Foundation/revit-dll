@@ -240,6 +240,17 @@ impl Document {
         out
     }
 
+    /// Step 2272: model/symbolic curve elements of one chain (a profile family's sketch).
+    pub fn chain_curves(&self, stream: &str, index: usize) -> Vec<(u64, rvt_model::Curve)> {
+        self.partitions
+            .iter()
+            .filter(|p| p.stream == stream)
+            .flat_map(|p| p.chains.iter().filter(|c| c.index == index && c.bits.is_some()))
+            .map(curve_elements::curve_elements)
+            .next()
+            .unwrap_or_default()
+    }
+
     /// Raw record body of an element (for format analysis).
     pub fn element_body(&self, id: u64) -> Option<Vec<u8>> {
         let &(pi, ci, ei) = self.index.get(&id)?;
@@ -899,4 +910,9 @@ pub(crate) fn hdr_marker(ch: &Chain) -> Option<Vec<u8>> {
     m.extend_from_slice(&t.to_le_bytes());
     m.extend_from_slice(&1u32.to_le_bytes());
     Some(m)
+}
+
+/// A §6 line or arc block at `i` (no denormal coordinates), as a curve (for analysis tools).
+pub fn curve_block(b: &[u8], i: usize) -> Option<rvt_model::Curve> {
+    curves::nodenorm(curves::block(b, i)).filter(|c| matches!(c, curves::Block::Line { .. } | curves::Block::Arc { .. })).map(|c| c.to_curve(0))
 }

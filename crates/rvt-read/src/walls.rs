@@ -281,11 +281,19 @@ pub(crate) fn wall_sweeps(ch: &Chain, is_element: &dyn Fn(i64) -> bool) -> Vec<r
             nodenorm(block(bd, i)).filter(|b| matches!(b, Block::Line { .. } | Block::Arc { .. }))
         };
         let path = (l.saturating_sub(200)..l.saturating_sub(40)).find_map(line_or_arc).or_else(|| (300..l.saturating_sub(40)).find_map(line_or_arc)).map(|b| b.to_curve(0));
+        let mut segments: Vec<rvt_model::Curve> = Vec::new();
+        for i in 300..l.saturating_sub(40) {
+            if let Some(c) = line_or_arc(i).map(|b| b.to_curve(0)) {
+                if !segments.contains(&c) {
+                    segments.push(c);
+                }
+            }
+        }
         if bits32 {
             let tys: HashSet<i64> = ch.elements.iter().filter(|x| x.cat == e.cat && x.tag != e.tag).map(|x| x.id as i64).collect();
             let hosts: Vec<i64> = (0..l.saturating_sub(3)).map(|o| i32_at(bd, o) as i64).find(|q| walls.contains(q)).into_iter().collect();
             let ty = (0..l.saturating_sub(3)).map(|o| i32_at(bd, o) as i64).find(|q| tys.contains(q) || is_element(*q));
-            out.push(rvt_model::WallSweep { id: e.id, cat: e.cat, sweep_type: ty, distance: None, hosts, path });
+            out.push(rvt_model::WallSweep { id: e.id, cat: e.cat, sweep_type: ty, distance: None, hosts, path, segments });
             continue;
         }
         let valid = |t: i64| ids.contains(&t) || t == -1 || is_element(t);
@@ -302,7 +310,7 @@ pub(crate) fn wall_sweeps(ch: &Chain, is_element: &dyn Fn(i64) -> bool) -> Vec<r
                 t = q;
             }
         }
-        out.push(rvt_model::WallSweep { id: e.id, cat: e.cat, sweep_type: valid(t).then_some(t), distance: Some(f64_at(bd, 136)), hosts, path });
+        out.push(rvt_model::WallSweep { id: e.id, cat: e.cat, sweep_type: valid(t).then_some(t), distance: Some(f64_at(bd, 136)), hosts, path, segments });
     }
     out
 }

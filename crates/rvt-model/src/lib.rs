@@ -679,4 +679,8 @@ pub struct WallSweep {
     pub distance: Option<f64>,
     pub hosts: Vec<i64>,
     pub path: Option<Curve>,
+    /// Step 2272: every distinct line/arc block of the body (a sweep along several wall faces
+    /// stores each segment, twice); not part of the reference output.
+    #[serde(skip_serializing)]
+    pub segments: Vec<Curve>,
 }

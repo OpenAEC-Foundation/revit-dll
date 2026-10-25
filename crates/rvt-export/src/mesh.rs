@@ -1242,6 +1242,76 @@ pub fn scene(doc: &Document) -> Scene {
             }
         }
     }
+    // Wall sweeps (step 2272; cat −2000181, S719 + segments): per straight segment a rectangular
+    // section, as high as the stored box (sweeps run level) and as wide as the type's profile (its
+    // profile family's sketch, the symbol @155 of the sweep type), else the stored box across a
+    // single segment; laid from the path towards the host wall. Segments outside the stored box are
+    // other blocks of the record. An approximation: the profile's outline is not followed yet.
+    {
+        let fam_of = doc.symbol_family();
+        let fam_chain = doc.family_chains();
+        let wall_line: std::collections::HashMap<i64, (P3, P3)> = walls_all.iter().map(|w| (w.id as i64, (w.p0, w.p1))).collect();
+        let mut prof_width: std::collections::HashMap<i64, Option<f64>> = std::collections::HashMap::new();
+        for sw in doc.wall_sweeps().into_iter().filter(|s| s.cat == -2000181 && !group_defs.contains(&s.id)) {
+            let Some(bb) = doc.element(sw.id).and_then(|e| e.bbox) else { continue };
+            let width = sw.sweep_type.filter(|t| *t > 0).and_then(|t| {
+                *prof_width.entry(t).or_insert_with(|| {
+                    let b = doc.element_body(t as u64)?;
+                    if b.len() < 163 {
+                        return None;
+                    }
+                    let sym = i64::from_le_bytes(b[155..163].try_into().ok()?);
+                    let key = fam_of.get(&(sym as u64)).and_then(|f| fam_chain.get(f))?;
+                    let xs: Vec<f64> = doc.chain_curves(&key.0, key.1).iter().flat_map(|(_, c)| c.p0.into_iter().chain(c.p1).chain(c.center)).map(|p| p[0]).collect();
+                    let (lo, hi) = (xs.iter().copied().fold(f64::INFINITY, f64::min), xs.iter().copied().fold(f64::NEG_INFINITY, f64::max));
+                    (hi - lo > 1e-3 && hi - lo < 10.0).then_some(hi - lo)
+                })
+            });
+            let inside = |p: P3| (0..3).all(|k| p[k] >= bb[k] - 0.1 && p[k] <= bb[k + 3] + 0.1);
+            let segs: Vec<(P3, P3)> = sw
+                .segments
+                .iter()
+                .filter(|c| c.kind == "line")
+                .filter_map(|c| Some((c.p0?, c.p1?)))
+                .filter(|(a, b)| inside(*a) && inside(*b) && (a[2] - b[2]).abs() < 1e-6 && norm(sub(*b, *a)) > 0.05)
+                .collect();
+            if segs.is_empty() {
+                continue;
+            }
+            let host = sw.hosts.first().and_then(|h| wall_line.get(h)).copied();
+            for (a, b) in &segs {
+                let Some(d) = unit(sub([b[0], b[1], 0.0], [a[0], a[1], 0.0])) else { continue };
+                let mut n = [-d[1], d[0], 0.0];
+                let mid = mul(add(*a, *b), 0.5);
+                if let Some((w0, w1)) = host {
+                    // towards the host wall's line
+                    let wm = mul(add(w0, w1), 0.5);
+                    let to_wall = dot(sub([wm[0], wm[1], 0.0], [mid[0], mid[1], 0.0]), n);
+                    let to_line = {
+                        let wd = unit(sub([w1[0], w1[1], 0.0], [w0[0], w0[1], 0.0])).unwrap_or(d);
+                        let rel = sub([mid[0], mid[1], 0.0], [w0[0], w0[1], 0.0]);
+                        let foot = add([w0[0], w0[1], 0.0], mul(wd, dot(rel, wd)));
+                        dot(sub(foot, [mid[0], mid[1], 0.0]), n)
+                    };
+                    let s = if to_line.abs() > 1e-6 { to_line } else { to_wall };
+                    if s < 0.0 {
+                        n = mul(n, -1.0);
+                    }
+                }
+                // width: the profile's, else the stored box across this (only) segment
+                let w = width.or_else(|| {
+                    (segs.len() == 1).then(|| {
+                        let k = if d[0].abs() > d[1].abs() { 1 } else { 0 };
+                        bb[k + 3] - bb[k]
+                    })
+                });
+                let Some(w) = w.filter(|w| *w > 1e-3) else { continue };
+                let (z0, z1) = (bb[2], bb[5]);
+                let at = |p: P3, s: f64, z: f64| [p[0] + n[0] * s, p[1] + n[1] * s, z];
+                batch!("Wall sweeps", [0.80, 0.78, 0.74]).hexa([at(*a, 0.0, z0), at(*b, 0.0, z0), at(*b, w, z0), at(*a, w, z0)], [at(*a, 0.0, z1), at(*b, 0.0, z1), at(*b, w, z1), at(*a, w, z1)]);
+            }
+        }
+    }
     // Topography (step 2233): Delaunay triangulation of the terrain points in plan, like Revit
     // regenerates the surface from its points.
     // step 2233: hidden group type definition copies (rac_basic: a second terrain over the same area)
