@@ -2223,9 +2223,15 @@ pub fn scene(doc: &Document) -> Scene {
                 .flatten();
             let remapped: Vec<Vec<[P3; 3]>> = match depth_map {
                 Some((nrm, [f0, f1, w0, w1])) => {
+                    // step 2267: a door in a wall thicker than the family's (snowdon: 1.05 against 0.67
+                    // ft) keeps its depth, its face on the +normal side on the wall's (Revit's depth:
+                    // 111 of 127 doors within 0.25 ft, before 49); windows still follow both faces
+                    let thicker = w1 - w0 > f1 - f0 && i.cat == -2000023;
                     let mv = |q: P3| -> P3 {
                         let sd = dot(q, nrm);
-                        let s2 = if sd < f0 {
+                        let s2 = if thicker {
+                            sd + w1 - f1
+                        } else if sd < f0 {
                             sd + w0 - f0
                         } else if sd > f1 {
                             sd + w1 - f1

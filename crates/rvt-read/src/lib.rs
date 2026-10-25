@@ -302,7 +302,19 @@ impl Document {
                 let v = w
                     .into_iter()
                     .map(|w| {
-                        let t = types.iter().find(|t| t.id as i64 == w.wall_type).map(|t| t.width);
+                        // step 2267: without a compound type in the chain (snowdon door family 439:
+                        // type class 4399), the wall's stored box across an axis-aligned wall
+                        let t = types.iter().find(|t| t.id as i64 == w.wall_type).map(|t| t.width).or_else(|| {
+                            let bb = ch.elements.iter().find(|e| e.id == w.id)?.bbox?;
+                            let (dx, dy) = ((w.p1[0] - w.p0[0]).abs(), (w.p1[1] - w.p0[1]).abs());
+                            if dy < 1e-6 * dx.max(1.0) {
+                                Some(bb[4] - bb[1])
+                            } else if dx < 1e-6 * dy.max(1.0) {
+                                Some(bb[3] - bb[0])
+                            } else {
+                                None
+                            }
+                        });
                         (w, t)
                     })
                     .collect();
