@@ -685,6 +685,21 @@ pub struct WallSweep {
     pub segments: Vec<Curve>,
 }
 
+/// Slab edge (step 2284; cat −2001392, class 1387): a profile swept along floor edges. Each
+/// path piece is [t0][t1] then a line (origin, unit direction) or an arc (X, Y, radius, centre),
+/// given here as a `Curve` with its end points; the profile lies on the right of the direction
+/// (outward), its top `vertical_offset` above the edge (API SWEEP_BASE_VERT_OFFSET −1012827) and
+/// `horizontal_offset` out (SWEEP_BASE_OFFSET −1012825).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct SlabEdge {
+    pub id: u64,
+    pub edge_type: Option<u64>,
+    pub host: Option<u64>,
+    pub vertical_offset: f64,
+    pub horizontal_offset: f64,
+    pub segments: Vec<Curve>,
+}
+
 /// Stairs run type (step 2276; StairsRunType, cat −2000919): flags and sizes (API IsMonolithic,
 /// HasTreads, HasRisers, StructuralDepth, TreadThickness, RiserThickness, NosingLength).
 #[derive(Debug, Clone, Serialize, PartialEq)]

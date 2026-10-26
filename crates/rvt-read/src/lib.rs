@@ -366,6 +366,127 @@ impl Document {
         out
     }
 
+    /// Step 2284: elements of a design option that is not its set's primary (API: a {3D} view
+    /// shows the primary options). An option set (cat −2006112) lists its options (cat −2006114)
+    /// and names the primary last (snowdon arch 2025 'Bleacher Seating': 2059967, 2059970, primary
+    /// 2059970 'Middle Stair'); an element carries its option id in its header (first 300 bytes;
+    /// snowdon floors 2062310.. and their slab edges in 2059967: absent from Revit's geometry).
+    pub fn secondary_option_elements(&self) -> HashSet<u64> {
+        let options: HashSet<u64> = self.elements_in_category(-2006114).map(|e| e.id).collect();
+        let mut secondary: HashSet<u64> = HashSet::new();
+        for set in self.elements_in_category(-2006112) {
+            let Some(b) = self.element_body(set.id) else { continue };
+            let found: Vec<u64> = (0..b.len().saturating_sub(7)).map(|o| util::i64_at(&b, o)).filter(|&q| q > 0 && options.contains(&(q as u64))).map(|q| q as u64).collect();
+            let Some(&primary) = found.last() else { continue };
+            secondary.extend(found.into_iter().filter(|q| *q != primary));
+        }
+        let mut out = HashSet::new();
+        if secondary.is_empty() {
+            return out;
+        }
+        for e in self.elements() {
+            if options.contains(&e.id) || e.category == -2006112 {
+                continue;
+            }
+            let Some(b) = self.element_body(e.id) else { continue };
+            if (8..b.len().min(300).saturating_sub(7)).any(|o| {
+                let q = util::i64_at(&b, o);
+                q > 0 && secondary.contains(&(q as u64))
+            }) {
+                out.insert(e.id);
+            }
+        }
+        out
+    }
+
+    /// Step 2284: slab edges (cat −2001392). The path is a run of 84-byte entries: f64 length, then
+    /// start point and unit direction (snowdon arch 2025 629902: 7 floor edges of floor 629119,
+    /// GT within 0.001 ft); the type is the first referenced slab-edge element without a box, the
+    /// host the first referenced floor; the offsets are [value f64][parameter id i64] pairs.
+    pub fn slab_edges(&self) -> Vec<rvt_model::SlabEdge> {
+        let f = |b: &[u8], o: usize| f64::from_le_bytes(b[o..o + 8].try_into().expect("8 bytes"));
+        let mut out = Vec::new();
+        for e in self.elements_in_category(-2001392) {
+            let Some(b) = self.element_body(e.id) else { continue };
+            if b.len() < 600 {
+                continue; // a type
+            }
+            let unit3 = |o: usize| -> Option<[f64; 3]> {
+                let v = [f(&b, o), f(&b, o + 8), f(&b, o + 16)];
+                let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+                (n.is_finite() && (n - 1.0).abs() < 1e-6).then_some(v)
+            };
+            let pt3 = |o: usize| -> Option<[f64; 3]> {
+                let v = [f(&b, o), f(&b, o + 8), f(&b, o + 16)];
+                v.iter().all(|x| x.is_finite() && x.abs() < 1e6).then_some(v)
+            };
+            // arc at s: t0 t1, X, Y (unit, orthogonal), r, C
+            let arc = |s: usize| -> Option<rvt_model::Curve> {
+                if s + 96 > b.len() {
+                    return None;
+                }
+                let (t0, t1) = (f(&b, s), f(&b, s + 8));
+                let (x, y) = (unit3(s + 16)?, unit3(s + 40)?);
+                let r = f(&b, s + 64);
+                let c = pt3(s + 72)?;
+                let ok = t0.is_finite() && t1.is_finite() && t1 > t0 && t1 - t0 < 7.0 && t0.abs() < 20.0 && r.is_finite() && r > 1e-3 && r < 1e5 && (x[0] * y[0] + x[1] * y[1] + x[2] * y[2]).abs() < 1e-6;
+                let at = |t: f64| [c[0] + r * (t.cos() * x[0] + t.sin() * y[0]), c[1] + r * (t.cos() * x[1] + t.sin() * y[1]), c[2] + r * (t.cos() * x[2] + t.sin() * y[2])];
+                ok.then(|| rvt_model::Curve { kind: "arc", p0: Some(at(t0)), p1: Some(at(t1)), t0: Some(t0), t1: Some(t1), center: Some(c), x: Some(x), y: Some(y), r: Some(r), ..Default::default() })
+            };
+            // line at s: t0 t1, origin, unit direction
+            let line = |s: usize| -> Option<rvt_model::Curve> {
+                if s + 64 > b.len() {
+                    return None;
+                }
+                let (t0, t1) = (f(&b, s), f(&b, s + 8));
+                let (o, d) = (pt3(s + 16)?, unit3(s + 40)?);
+                let ok = t0.is_finite() && t1.is_finite() && t1 - t0 > 1e-4 && t1 - t0 < 1e4;
+                let at = |t: f64| [o[0] + t * d[0], o[1] + t * d[1], o[2] + t * d[2]];
+                ok.then(|| rvt_model::Curve { kind: "line", p0: Some(at(t0)), p1: Some(at(t1)), t0: Some(t0), t1: Some(t1), ..Default::default() })
+            };
+            // pieces are 84 (line) or 117 (arc) bytes apart; the longest chain of pieces, the last
+            // one on a tie (an arc is tried first: its X and Y also read as a line)
+            let piece = |s: usize| -> Option<(rvt_model::Curve, usize)> { arc(s).map(|c| (c, 117)).or_else(|| line(s).map(|c| (c, 84))) };
+            let mut best: Vec<rvt_model::Curve> = Vec::new();
+            for s0 in 0..b.len().saturating_sub(64) {
+                let mut run = Vec::new();
+                let mut s = s0;
+                while let Some((c, step)) = piece(s) {
+                    run.push(c);
+                    // the next piece is a line or an arc: stride of this piece, else of the other kind
+                    let next = [s + step, s + if step == 84 { 117 } else { 84 }];
+                    match next.into_iter().find(|n| piece(*n).is_some()) {
+                        Some(n) => s = n,
+                        None => break,
+                    }
+                }
+                if !run.is_empty() && run.len() >= best.len() {
+                    best = run;
+                }
+            }
+            if best.is_empty() {
+                continue;
+            }
+            let refs: Vec<u64> = (0..b.len().min(600).saturating_sub(8)).map(|o| util::i64_at(&b, o)).filter(|&q| q > 0 && q as u64 != e.id).map(|q| q as u64).collect();
+            let is_type = |q: u64| q != e.id && self.element(q).is_some_and(|x| x.category == -2001392 && x.bbox.is_none()) && self.element_body(q).is_some_and(|tb| tb.len() < 600);
+            // 2019 and older: the type as an i32 (rac_advanced 2019 217842: type 19887 @102)
+            let edge_type = refs.iter().copied().find(|q| is_type(*q)).or_else(|| {
+                (0..b.len().min(600).saturating_sub(4)).map(|o| i32::from_le_bytes(b[o..o + 4].try_into().expect("4 bytes"))).filter(|&q| q > 0).map(|q| q as u64).find(|q| is_type(*q))
+            });
+            let host = refs.iter().copied().find(|q| self.element(*q).is_some_and(|x| x.category == -2000032));
+            let param = |pid: i64| (8..b.len().saturating_sub(8)).find(|&o| util::i64_at(&b, o) == pid).map(|o| f(&b, o - 8)).filter(|v| v.is_finite() && v.abs() < 1e3);
+            out.push(rvt_model::SlabEdge {
+                id: e.id,
+                edge_type,
+                host,
+                vertical_offset: param(-1012827).unwrap_or(0.0),
+                horizontal_offset: param(-1012825).unwrap_or(0.0),
+                segments: best,
+            });
+        }
+        out
+    }
+
     /// Step 2271: wall sweeps and reveals of every project chain (port of rvtread `wall_sweeps`).
     pub fn wall_sweeps(&self) -> Vec<rvt_model::WallSweep> {
         let is_element = |id: i64| id > 0 && self.index.contains_key(&(id as u64));

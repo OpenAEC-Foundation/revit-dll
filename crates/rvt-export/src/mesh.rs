@@ -969,6 +969,9 @@ pub fn scene(doc: &Document) -> Scene {
     // phase with 'Show Complete' (snowdon arch 2025: 6 legend floors, created = demolished = 'Legends';
     // rac/rme/rst 2026: no element demolished, every element of Revit's geometry has a phase).
     group_defs.extend(doc.element_phases().into_iter().filter(|(_, (_, d))| d.is_some()).map(|(id, _)| id));
+    // Step 2284: elements of a secondary design option are not in the {3D} view (snowdon arch 2025
+    // 'Bleacher Seating' option 'Continuous Bleachers no Stairs': 9 floors and their slab edges).
+    group_defs.extend(doc.secondary_option_elements());
     // step 2227: the expensive readers once
     let walls_all = {
         // step 2228: one record per id (a wall can appear in two project chains)
@@ -1446,6 +1449,139 @@ pub fn scene(doc: &Document) -> Scene {
             let bot = [pt(ta, w0, z0 - depth), pt(tb, w0, z1 - depth), pt(tb, w1, z1 - depth), pt(ta, w1, z0 - depth)];
             let top = [pt(ta, w0, z0), pt(tb, w0, z1), pt(tb, w1, z1), pt(ta, w1, z0)];
             batch!("Stairs", [0.70, 0.66, 0.60]).hexa(bot, top);
+        }
+    }
+    // Slab edges (step 2284; cat −2001392): the type's profile family sketch (the first symbol the
+    // type references), sized by the type: an axis whose sketch extent equals a current value of
+    // the profile family takes the symbol's value of the same parameter name (snowdon 'X' 0.0667 →
+    // 0.0208, 'Y' 0.0833 → 1.0; GT plate 0.021 × 1.0 ft). Profile u runs out from the floor edge
+    // (right of the segment direction), v down from the edge top + vertical offset (GT −0.75..+0.25
+    // with offset 0.25). Lines are swept straight, arcs in steps of ≤ 0.5 ft; corners are not mitred.
+    {
+        let edges: Vec<rvt_model::SlabEdge> = doc.slab_edges().into_iter().filter(|e| !group_defs.contains(&e.id)).collect();
+        if !edges.is_empty() {
+            let fam_of = doc.symbol_family();
+            let fam_chain = doc.family_chains();
+            let gnames = doc.parameter_names_global();
+            let rows: std::collections::HashMap<u64, rvt_model::ValueSet> = doc.type_values_by_chain().into_iter().flat_map(|(_, _, m)| m.into_iter()).collect();
+            let mut profiles: std::collections::HashMap<u64, Option<Vec<[f64; 2]>>> = std::collections::HashMap::new();
+            for e in &edges {
+                let Some(t) = e.edge_type else { continue };
+                let prof = profiles
+                    .entry(t)
+                    .or_insert_with(|| {
+                        let b = doc.element_body(t)?;
+                        let sym_of = |v: i64| (v > 0).then(|| fam_of.get(&(v as u64)).and_then(|f| fam_chain.get(f)).map(|k| (v as u64, k.clone()))).flatten();
+                        // an i64 reference, else (2019 and older) an i32
+                        let (sym, key) = (0..b.len().saturating_sub(8))
+                            .find_map(|o| sym_of(i64_at_le(&b, o)))
+                            .or_else(|| (0..b.len().saturating_sub(4)).find_map(|o| sym_of(i32::from_le_bytes(b[o..o + 4].try_into().unwrap()) as i64)))?;
+                        // the sketch as one loop: each curve a polyline (an arc in 6 steps from its centre,
+                        // axes, radius and parameters; snowdon type 909838: 4 fillet arcs without end points)
+                        let mut segs: Vec<Vec<[f64; 2]>> = doc
+                            .chain_curves(&key.0, key.1)
+                            .into_iter()
+                            .filter_map(|(_, c)| match (c.kind, c.center, c.x, c.y, c.r, c.t0, c.t1) {
+                                ("arc", Some(cc), Some(x), Some(y), Some(r), Some(t0), Some(t1)) => Some(
+                                    (0..=6)
+                                        .map(|j| {
+                                            let t = t0 + (t1 - t0) * j as f64 / 6.0;
+                                            [cc[0] + r * (t.cos() * x[0] + t.sin() * y[0]), cc[1] + r * (t.cos() * x[1] + t.sin() * y[1])]
+                                        })
+                                        .collect(),
+                                ),
+                                _ => Some(vec![[c.p0?[0], c.p0?[1]], [c.p1?[0], c.p1?[1]]]),
+                            })
+                            .collect();
+                        let mut poly = segs.pop()?;
+                        let near = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() < 1e-5 && (a[1] - b[1]).abs() < 1e-5;
+                        while !segs.is_empty() {
+                            let last = *poly.last().unwrap();
+                            let k = segs.iter().position(|v| near(v[0], last) || near(*v.last().unwrap(), last))?;
+                            let mut v = segs.remove(k);
+                            if !near(v[0], last) {
+                                v.reverse();
+                            }
+                            poly.extend(v.into_iter().skip(1));
+                        }
+                        if near(poly[0], *poly.last().unwrap()) {
+                            poly.pop();
+                        }
+                        if poly.len() < 3 {
+                            return None;
+                        }
+                        // size by the type: per axis the current value equal to the sketch extent
+                        let (lo, hi) = poly.iter().fold(([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]), |(l, h), q| ([l[0].min(q[0]), l[1].min(q[1])], [h[0].max(q[0]), h[1].max(q[1])]));
+                        let cur = doc.family_current_values(&key.0, key.1);
+                        let names = doc.parameter_names_of(&key.0, key.1);
+                        let scale = |k: usize| -> f64 {
+                            let ext = hi[k] - lo[k];
+                            let name = cur.as_ref().and_then(|c| c.rows.iter().find(|r| r.param > 0 && (r.num - ext).abs() < 1e-6)).and_then(|r| names.get(&(r.param as u64)).cloned().flatten());
+                            let v = name.and_then(|n| rows.get(&sym).and_then(|vs| vs.rows.iter().find(|r| r.param > 0 && gnames.get(&(r.param as u64)).cloned().flatten().as_deref() == Some(n.as_str()))).map(|r| r.num));
+                            v.filter(|v| *v > 1e-6 && ext > 1e-9).map_or(1.0, |v| v / ext)
+                        };
+                        let (sx, sy) = (scale(0), scale(1));
+                        Some(poly.into_iter().map(|q| [q[0] * sx, q[1] * sy]).collect())
+                    })
+                    .clone();
+                let Some(prof) = prof else { continue };
+                let b = batch!("Slab edges", [0.62, 0.60, 0.56]);
+                let k = prof.len();
+                let c = prof.iter().fold([0.0, 0.0], |a, q| [a[0] + q[0] / k as f64, a[1] + q[1] / k as f64]);
+                // v down (snowdon: profile 0..1 hangs below the edge top + offset) or up (rac_advanced
+                // 2019 217842: profile 0..−0.98, stored box from top − 0.98): the stored box's bottom
+                // is the profile's bottom; the sign that puts it there (down without a box)
+                let (vlo, vhi) = prof.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), q| (l.min(q[1]), h.max(q[1])));
+                let top = e.segments.first().and_then(|c| c.p0).map_or(0.0, |p| p[2]) + e.vertical_offset;
+                let vs = match doc.element(e.id).and_then(|x| x.bbox) {
+                    Some(bb) if ((top + vlo) - bb[2]).abs() + 1e-9 < ((top - vhi) - bb[2]).abs() => 1.0,
+                    _ => -1.0,
+                };
+                for cv in &e.segments {
+                    // samples along the piece: (point, horizontal tangent)
+                    let samples: Vec<(P3, P3)> = match (cv.kind, cv.p0, cv.p1, cv.center, cv.x, cv.y, cv.r, cv.t0, cv.t1) {
+                        ("arc", _, _, Some(cc), Some(x), Some(y), Some(r), Some(t0), Some(t1)) => {
+                            let n = (((t1 - t0) * r / 0.5).ceil() as usize).clamp(2, 128);
+                            (0..=n)
+                                .map(|j| {
+                                    let t = t0 + (t1 - t0) * j as f64 / n as f64;
+                                    let pt = add(cc, add(mul(x, r * t.cos()), mul(y, r * t.sin())));
+                                    (pt, add(mul(x, -t.sin()), mul(y, t.cos())))
+                                })
+                                .collect()
+                        }
+                        (_, Some(p0), Some(p1), ..) => match unit(sub(p1, p0)) {
+                            Some(d) => vec![(p0, d), (p1, d)],
+                            None => continue,
+                        },
+                        _ => continue,
+                    };
+                    let frame = |(pt, d): (P3, P3), q: [f64; 2]| -> Option<P3> {
+                        let n = unit([d[1], -d[0], 0.0])?;
+                        Some(add(add(pt, mul(n, e.horizontal_offset + q[0])), [0.0, 0.0, e.vertical_offset + vs * q[1]]))
+                    };
+                    for w in samples.windows(2) {
+                        for j in 0..k {
+                            let (p, q) = (prof[j], prof[(j + 1) % k]);
+                            if let (Some(a0), Some(b0), Some(b1), Some(a1)) = (frame(w[0], p), frame(w[0], q), frame(w[1], q), frame(w[1], p)) {
+                                b.quad(a0, b0, b1, a1);
+                            }
+                        }
+                    }
+                    for (end, flip) in [(samples[0], false), (samples[samples.len() - 1], true)] {
+                        for j in 0..k {
+                            let (p, q) = (prof[j], prof[(j + 1) % k]);
+                            if let (Some(cp), Some(pp), Some(qp)) = (frame(end, c), frame(end, p), frame(end, q)) {
+                                if flip {
+                                    b.tri(cp, pp, qp);
+                                } else {
+                                    b.tri(cp, qp, pp);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
     // Wall sweeps (step 2272; cat −2000181, S719 + segments): per straight segment a rectangular
