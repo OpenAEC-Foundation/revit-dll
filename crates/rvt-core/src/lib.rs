@@ -5,10 +5,12 @@
 
 pub mod cfb;
 pub mod chain;
+pub mod schema;
 pub mod tags;
 mod tags_gen;
 
 pub use cfb::Cfb;
+pub use schema::Schema;
 pub use chain::{chains, section_a_b, strip_inserted, Chain, Element};
 pub use tags::vtag;
 

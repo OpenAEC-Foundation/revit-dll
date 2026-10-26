@@ -8,4 +8,5 @@ publish.workspace = true
 
 [dependencies]
 rvt-core.workspace = true
+flate2.workspace = true
 rvt-model.workspace = true
