@@ -1902,6 +1902,15 @@ pub fn scene(doc: &Document) -> Scene {
             ((st, ix), v)
         })
         .collect();
+    let chain_blrev: std::collections::HashMap<(String, usize), (Vec<BlendSolid>, Vec<RevolveSolid>)> = doc
+        .family_blends_revolves_by_chain()
+        .into_iter()
+        .map(|(st, ix, mut b, mut r)| {
+            b.retain(|x| !fam_group_defs.contains(&x.id));
+            r.retain(|x| !fam_group_defs.contains(&x.id));
+            ((st, ix), (b, r))
+        })
+        .collect();
     // Step 2268: a form whose Visible is bound to a yes/no family parameter (S2268) is hidden when
     // that parameter is 0 for the type: the symbol's value (matched by parameter name), else the
     // family's current value (snowdon door family 439: 'Masonry Frame' 1 / 'Dry Wall Frame' 0,
@@ -1917,9 +1926,12 @@ pub fn scene(doc: &Document) -> Scene {
         doc.type_values_by_chain().into_iter().flat_map(|(_, _, m)| m.into_iter()).collect()
     };
     let vis_names = if vis_assoc.is_empty() { Default::default() } else { doc.parameter_names_global() };
-    let hidden_cache: std::cell::RefCell<std::collections::HashMap<((String, usize), Option<u64>), std::rc::Rc<std::collections::HashSet<u64>>>> = Default::default();
-    let hidden_forms = |key: &(String, usize), sym: Option<u64>| -> std::rc::Rc<std::collections::HashSet<u64>> {
-        if let Some(h) = hidden_cache.borrow().get(&(key.clone(), sym)) {
+    let hidden_cache: std::cell::RefCell<std::collections::HashMap<((String, usize), Option<u64>, Option<u64>), std::rc::Rc<std::collections::HashSet<u64>>>> = Default::default();
+    // step 2283: `host` = the type of the family a nested instance sits in; its value counts when
+    // the nested type has none (snowdon canopy type 'Include Dome' 0, linked through the nested
+    // instance to the support family's 'Include Dome', whose own current value is 1)
+    let hidden_forms = |key: &(String, usize), sym: Option<u64>, host: Option<u64>| -> std::rc::Rc<std::collections::HashSet<u64>> {
+        if let Some(h) = hidden_cache.borrow().get(&(key.clone(), sym, host)) {
             return h.clone();
         }
         let ids: Vec<(u64, u64)> = chain_solids
@@ -1928,6 +1940,9 @@ pub fn scene(doc: &Document) -> Scene {
             .flatten()
             .map(|s| s.id)
             .chain(chain_sweeps.get(key).into_iter().flatten().map(|s| s.id))
+            // step 2283: blends and revolves too (snowdon canopy support family: a dome revolve,
+            // Visible bound to a parameter that is off; Revit draws no dome)
+            .chain(chain_blrev.get(key).into_iter().flat_map(|(b, r)| b.iter().map(|x| x.id).chain(r.iter().map(|x| x.id))))
             .filter_map(|id| vis_assoc.get(&id).map(|f| (id, *f)))
             .collect();
         let mut hidden = std::collections::HashSet::new();
@@ -1936,9 +1951,12 @@ pub fn scene(doc: &Document) -> Scene {
             let current = doc.family_current_values(&key.0, key.1);
             for (id, fp) in ids {
                 let name = fnames.get(&fp).cloned().flatten();
-                let from_type = sym.and_then(|s| sym_rows.get(&s)).and_then(|vs| {
-                    vs.rows.iter().find(|r| r.param > 0 && name.is_some() && vis_names.get(&(r.param as u64)).cloned().flatten() == name).map(|r| r.int)
-                });
+                let by_name = |s: u64| {
+                    sym_rows.get(&s).and_then(|vs| {
+                        vs.rows.iter().find(|r| r.param > 0 && name.is_some() && vis_names.get(&(r.param as u64)).cloned().flatten() == name).map(|r| r.int)
+                    })
+                };
+                let from_type = sym.and_then(by_name).or_else(|| host.and_then(by_name));
                 let value = from_type.or_else(|| current.as_ref().and_then(|c| c.rows.iter().find(|r| r.param == fp as i64).map(|r| r.int)));
                 if value == Some(0) {
                     hidden.insert(id);
@@ -1946,12 +1964,12 @@ pub fn scene(doc: &Document) -> Scene {
             }
         }
         let h = std::rc::Rc::new(hidden);
-        hidden_cache.borrow_mut().insert((key.clone(), sym), h.clone());
+        hidden_cache.borrow_mut().insert((key.clone(), sym, host), h.clone());
         h
     };
     let solids_of = |sym: u64| -> Vec<&ExtrusionSolid> {
         let Some(k) = symbol_family.get(&sym).and_then(|f| family_chain.get(f)) else { return vec![] };
-        let hid = hidden_forms(k, Some(sym));
+        let hid = hidden_forms(k, Some(sym), None);
         chain_solids
             .get(k)
             .map(|v| finest_variants(v.iter().filter(|s| s.void != Some(true) && s.host_block.is_none() && !hid.contains(&s.id)).collect()))
@@ -1971,22 +1989,15 @@ pub fn scene(doc: &Document) -> Scene {
             .map(|v| finest_variants(v.iter().filter(|s| s.void != Some(true)).collect()))
             .unwrap_or_default()
     };
-    let chain_blrev: std::collections::HashMap<(String, usize), (Vec<BlendSolid>, Vec<RevolveSolid>)> = doc
-        .family_blends_revolves_by_chain()
-        .into_iter()
-        .map(|(st, ix, mut b, mut r)| {
-            b.retain(|x| !fam_group_defs.contains(&x.id));
-            r.retain(|x| !fam_group_defs.contains(&x.id));
-            ((st, ix), (b, r))
-        })
-        .collect();
     let blrev_of = |sym: u64| -> Vec<[P3; 3]> {
         let mut t = Vec::new();
-        if let Some((bl, rv)) = symbol_family.get(&sym).and_then(|f| family_chain.get(f)).and_then(|k| chain_blrev.get(k)) {
-            for b in bl.iter().filter(|b| b.void != Some(true)) {
+        let Some(k) = symbol_family.get(&sym).and_then(|f| family_chain.get(f)) else { return t };
+        let hid = hidden_forms(k, Some(sym), None);
+        if let Some((bl, rv)) = chain_blrev.get(k) {
+            for b in bl.iter().filter(|b| b.void != Some(true) && !hid.contains(&b.id)) {
                 t.extend(blend_triangles(b));
             }
-            for r in rv.iter().filter(|r| r.void != Some(true)) {
+            for r in rv.iter().filter(|r| r.void != Some(true) && !hid.contains(&r.id)) {
                 t.extend(revolve_triangles(r));
             }
         }
@@ -1994,7 +2005,7 @@ pub fn scene(doc: &Document) -> Scene {
     };
     let sweeps_of = |sym: u64| -> Vec<&SweepSolid> {
         let Some(k) = symbol_family.get(&sym).and_then(|f| family_chain.get(f)) else { return vec![] };
-        let hid = hidden_forms(k, Some(sym));
+        let hid = hidden_forms(k, Some(sym), None);
         chain_sweeps.get(k).map(|v| finest_sweeps(v.iter().filter(|s| s.void != Some(true) && !hid.contains(&s.id)).collect())).unwrap_or_default()
     };
     let (mut n_family, mut n_box) = (0usize, 0usize);
@@ -2018,10 +2029,11 @@ pub fn scene(doc: &Document) -> Scene {
         let f = symbol_family.get(&sym).or_else(|| nested_symbol_family.get(&sym))?;
         family_chain.get(f).or_else(|| nested_family_chain.get(f)).cloned()
     };
-    let chain_forms = |key: &(String, usize)| -> Vec<[P3; 3]> {
+    let chain_forms = |key: &(String, usize), sym: Option<u64>, host: Option<u64>| -> Vec<[P3; 3]> {
         let mut t = Vec::new();
-        // step 2268: nested families by their current values
-        let hid = hidden_forms(key, None);
+        // step 2268: nested families by their current values; step 2283: the nested instance's
+        // type first (snowdon canopy: support type 'Include Dome' = 0 hides the dome revolve)
+        let hid = hidden_forms(key, sym, host);
         if let Some(v) = chain_solids.get(key) {
             let sol: Vec<&ExtrusionSolid> = finest_variants(v.iter().filter(|s| s.void != Some(true) && s.host_block.is_none() && !hid.contains(&s.id)).collect());
             t.extend(family_triangles(&sol));
@@ -2032,10 +2044,10 @@ pub fn scene(doc: &Document) -> Scene {
             }
         }
         if let Some((bl, rv)) = chain_blrev.get(key) {
-            for b in bl.iter().filter(|b| b.void != Some(true)) {
+            for b in bl.iter().filter(|b| b.void != Some(true) && !hid.contains(&b.id)) {
                 t.extend(blend_triangles(b));
             }
-            for r in rv.iter().filter(|r| r.void != Some(true)) {
+            for r in rv.iter().filter(|r| r.void != Some(true) && !hid.contains(&r.id)) {
                 t.extend(revolve_triangles(r));
             }
         }
@@ -2046,7 +2058,8 @@ pub fn scene(doc: &Document) -> Scene {
         depth: usize,
         chain_insts: &std::collections::HashMap<(String, usize), Vec<Instance>>,
         chain_of_symbol: &dyn Fn(u64) -> Option<(String, usize)>,
-        chain_forms: &dyn Fn(&(String, usize)) -> Vec<[P3; 3]>,
+        chain_forms: &dyn Fn(&(String, usize), Option<u64>, Option<u64>) -> Vec<[P3; 3]>,
+        host: Option<u64>,
     ) -> Vec<[P3; 3]> {
         let mut out = Vec::new();
         if depth > 3 {
@@ -2055,8 +2068,8 @@ pub fn scene(doc: &Document) -> Scene {
         for i in chain_insts.get(key).into_iter().flatten() {
             let (Some(sym), Some(o), Some(m)) = (i.symbol, i.origin, i.rotation) else { continue };
             let Some(k2) = chain_of_symbol(sym).filter(|k2| k2 != key) else { continue };
-            let mut t = chain_forms(&k2);
-            t.extend(nested_tris(&k2, depth + 1, chain_insts, chain_of_symbol, chain_forms));
+            let mut t = chain_forms(&k2, Some(sym), host);
+            t.extend(nested_tris(&k2, depth + 1, chain_insts, chain_of_symbol, chain_forms, Some(sym)));
             // a mirrored placement keeps the faces outward by reversing the winding
             let rev = det3(&m) < 0.0;
             out.extend(t.into_iter().map(|tr| {
@@ -2317,7 +2330,7 @@ pub fn scene(doc: &Document) -> Scene {
             own.extend(blrev_of(sym));
             let mut local = scale_plan(&own, column_scale(sym, &own));
             if let Some(key) = chain_of_symbol(sym) {
-                local.extend(nested_tris(&key, 1, &chain_insts, &chain_of_symbol, &chain_forms));
+                local.extend(nested_tris(&key, 1, &chain_insts, &chain_of_symbol, &chain_forms, Some(sym)));
             }
             let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
             for t in &local {
@@ -2424,7 +2437,10 @@ pub fn scene(doc: &Document) -> Scene {
         // itself (site, massing or nested content); drawing it hides the building.
         // step 2256: structural foundations (pile caps with piles) may be large in every direction
         // step 2278: planting and entourage may be large too (snowdon trees 15 x 16 x 18 ft)
-        if ext.iter().all(|v| *v * FT > 3.0) && !matches!(i.cat, -2001300 | -2001360 | -2001370) {
+        // step 2283: nor a family holding adaptive content (snowdon canopy 2220523, box 7.4 × 5.0 ×
+        // 6.6 m: its box spans the shared struts; its own forms are placed unfitted further on)
+        let adaptive_host = i.symbol.and_then(|s| symbol_family.get(&s)).and_then(|f| family_chain.get(f)).is_some_and(|k| adaptive_chains.contains(k));
+        if ext.iter().all(|v| *v * FT > 3.0) && !matches!(i.cat, -2001300 | -2001360 | -2001370) && !adaptive_host {
             continue;
         }
         if matches!(i.cat, -2000170 | -2000171) && ext.iter().filter(|v| **v * FT > 3.0).count() >= 2 {
@@ -2460,7 +2476,7 @@ pub fn scene(doc: &Document) -> Scene {
                     };
                     // step 2246: nested families; candidates with them first (a shared nested component
                     // is a separate instance: linked instances skip these, see `linked`)
-                    let nested = chain_of_symbol(sym).map(|key| nested_tris(&key, 1, &chain_insts, &chain_of_symbol, &chain_forms)).unwrap_or_default();
+                    let nested = chain_of_symbol(sym).map(|key| nested_tris(&key, 1, &chain_insts, &chain_of_symbol, &chain_forms, Some(sym))).unwrap_or_default();
                     let with = |x: &Vec<[P3; 3]>| -> Vec<[P3; 3]> { x.iter().chain(nested.iter()).copied().collect() };
                     let withs = if nested.is_empty() { vec![] } else { vec![with(&all), with(&no_sweeps), with(&ext_only)] };
                     // nested candidates first; `plain_count` = how many come first (dropped for
@@ -2795,8 +2811,20 @@ pub fn scene(doc: &Document) -> Scene {
         // step 2281: an adaptive component (its family has adaptive points, cat −2000710) without
         // readable forms: its stored box also holds the reference points and says neither the
         // direction nor the size of the form (snowdon canopy struts: box 16.5 × 9.1 × 13.2 ft,
-        // Revit's rod 8.8 × 2.9 × 7 ft, 0.7 m²); no box is less wrong than a slab
+        // Revit's rod 8.8 × 2.9 × 7 ft, 0.7 m²); no box is less wrong than a slab.
+        // Step 2283: a family that holds adaptive content beside readable forms (snowdon canopy
+        // 2220523: nested columns, plus rings and shared struts we cannot fit) misses the box fit
+        // because its box also spans that content; its forms are placed as they are, unfitted.
         if i.symbol.and_then(|s| symbol_family.get(&s)).and_then(|f| family_chain.get(f)).is_some_and(|k| adaptive_chains.contains(k)) {
+            if let (Some(c), Some(o), Some(m)) = (i.symbol.and_then(|s| shape_cache.get(&s)).and_then(|c| c.first().cloned()), i.origin, i.rotation) {
+                let rev = det3(&m) < 0.0;
+                let b = batch!(name, color);
+                for t in &c {
+                    let (p, q) = if rev { (t[2], t[0]) } else { (t[0], t[2]) };
+                    b.tri(place(o, &m, p), place(o, &m, t[1]), place(o, &m, q));
+                }
+                n_family += 1;
+            }
             continue;
         }
         n_box += 1;
