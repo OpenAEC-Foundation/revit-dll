@@ -1078,14 +1078,19 @@ fn instance_batch(cat: i32) -> (&'static str, [f32; 3]) {
     }
 }
 
-/// Batches from Revit's saved graphics (open-research step 2304), with per batch the number of
-/// elements that would be drawn in it but have no saved-graphics record. `skip`: elements not drawn
-/// themselves (group definition copies, demolished, secondary options, curtain walls, in-place
-/// family members).
-fn saved_batches(doc: &Document, skip: &std::collections::HashSet<u64>) -> BTreeMap<&'static str, (Batch, usize)> {
-    let Some(sg) = doc.saved_graphics() else { return BTreeMap::new() };
-    let mut mesher = crate::saved::SavedMesher::new(sg);
-    let mut saved: BTreeMap<&'static str, (Batch, usize)> = BTreeMap::new();
+/// An element drawn from saved graphics (open-research step 2304): id, batch, colour, whether it
+/// keeps the batch from being replaced when it has no record.
+struct SavedCand {
+    id: u64,
+    name: &'static str,
+    color: [f32; 3],
+    counted: bool,
+}
+
+/// The elements drawn from saved graphics. `skip`: elements not drawn themselves (group
+/// definition copies, demolished, secondary options, curtain walls, in-place family members).
+fn saved_candidates(doc: &Document, sg: &rvt_read::SavedGraphics, skip: &std::collections::HashSet<u64>) -> Vec<SavedCand> {
+    let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for e in doc.elements() {
         // chain 0: the project (other chains are family documents)
@@ -1093,35 +1098,89 @@ fn saved_batches(doc: &Document, skip: &std::collections::HashSet<u64>) -> BTree
             continue;
         }
         let Some((name, color, counted)) = saved_batch(e.category) else { continue };
-        // the catch-all batch takes family instances only (snowdon arch 2025: energy analysis
-        // surfaces and spaces, 420 000 ft², and parts, shown only with 'Show Parts')
-        // types, rooms, analytical elements and groups are not drawn themselves
+        // types, rooms, analytical elements and groups are not drawn themselves; the catch-all
+        // batch takes family instances only (snowdon arch 2025: energy analysis surfaces and
+        // spaces, 420 000 ft², and parts, shown only with 'Show Parts')
         let class = e.class_tag.and_then(|t| sg.schema.class(t)).map_or("", |c| c.name.as_str());
         let is_type = ["Sym", "Symbol", "Type", "Attributes", "Attr"].iter().any(|k| class.ends_with(k));
         if is_type || (name == "Other family instances" && class != "FamilyInstance") || class.starts_with("Analytical") || matches!(class, "RoomElem" | "ElementGroup") {
             continue;
         }
-        let entry = saved.entry(name).or_insert_with(|| (Batch::new(name, color), 0));
-        match mesher.element(e.id).or_else(|| crate::rebar::element(sg, e.id)) {
-            Some(tris) => {
-                if std::env::var_os("RVT_MESH_SAVED_IDS").is_some() {
-                    let a: f64 = tris.iter().map(|t| norm(cross(sub(t[1], t[0]), sub(t[2], t[0]))) / 2.0).sum();
-                    eprintln!("saved element {} {name} {:.2} ft2 cat {} class {class}", e.id, a, e.category);
+        out.push(SavedCand { id: e.id, name, color, counted });
+    }
+    out
+}
+
+/// The batches saved graphics replace: some element of the batch has a record and none that
+/// counts lacks one (no triangles with a record: not drawn by Revit either, racbasic 2026 fixture
+/// 937138; no record at all: unknown, rebar aside, which is read from channel 102). Known before
+/// meshing, so the readers of those batches are skipped (step 2306).
+fn saved_plan(sg: &rvt_read::SavedGraphics, cands: &[SavedCand]) -> std::collections::HashSet<&'static str> {
+    let mut by: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
+    for c in cands {
+        let e = by.entry(c.name).or_default();
+        if sg.bodies.contains_key(&c.id) || sg.objects.contains_key(&c.id) {
+            e.0 += 1;
+        } else if c.counted {
+            e.1 += 1;
+            if std::env::var_os("RVT_MESH_STATS").is_some() && e.1 <= 4 {
+                eprintln!("  no saved graphics: {} {}", c.name, c.id);
+            }
+        }
+    }
+    if std::env::var_os("RVT_MESH_STATS").is_some() {
+        for (n, (has, missing)) in &by {
+            eprintln!("saved plan {n}: {has} with saved graphics, {missing} without");
+        }
+    }
+    by.into_iter().filter(|(_, (has, missing))| *has > 0 && *missing == 0).map(|(n, _)| n).collect()
+}
+
+/// Batches from saved graphics (and rebar from channel 102), meshed on several threads (each its
+/// own symbol cache) and joined in element order.
+fn saved_batches(doc: &Document, cands: Vec<SavedCand>) -> BTreeMap<&'static str, Batch> {
+    let Some(sg) = doc.saved_graphics() else { return BTreeMap::new() };
+    let n = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8);
+    let chunk = cands.len().div_ceil(n).max(1);
+    let parts: Vec<BTreeMap<&'static str, Batch>> = std::thread::scope(|sc| {
+        let jobs: Vec<_> = cands
+            .chunks(chunk)
+            .map(|part| {
+                sc.spawn(move || {
+                    let mut mesher = crate::saved::SavedMesher::new(sg);
+                    let mut saved: BTreeMap<&'static str, Batch> = BTreeMap::new();
+                    for c in part {
+                        let b = saved.entry(c.name).or_insert_with(|| Batch::new(c.name, c.color));
+                        if let Some(tris) = mesher.element(c.id).or_else(|| crate::rebar::element(sg, c.id)) {
+                            if std::env::var_os("RVT_MESH_SAVED_IDS").is_some() {
+                                let a: f64 = tris.iter().map(|t| norm(cross(sub(t[1], t[0]), sub(t[2], t[0]))) / 2.0).sum();
+                                eprintln!("saved element {} {} {:.2} ft2", c.id, c.name, a);
+                            }
+                            for t in tris {
+                                b.tri(t[0], t[1], t[2]);
+                            }
+                        }
+                    }
+                    saved
+                })
+            })
+            .collect();
+        jobs.into_iter().filter_map(|j| j.join().ok()).collect()
+    });
+    let mut saved: BTreeMap<&'static str, Batch> = BTreeMap::new();
+    for part in parts {
+        for (name, b) in part {
+            match saved.get_mut(name) {
+                Some(acc) => {
+                    let base = (acc.positions.len() / 3) as u32;
+                    acc.positions.extend_from_slice(&b.positions);
+                    acc.normals.extend_from_slice(&b.normals);
+                    acc.indices.extend(b.indices.iter().map(|i| i + base));
                 }
-                for t in tris {
-                    entry.0.tri(t[0], t[1], t[2]);
+                None => {
+                    saved.insert(name, b);
                 }
             }
-            // no saved triangles: not drawn by Revit either (racbasic 2026 fixture 937138:
-            // flat box, not in the {3D} view), unless there is no saved-graphics record at
-            // all (rebar has none, yet is drawn)
-            None if counted && !sg.bodies.contains_key(&e.id) => {
-                entry.1 += 1;
-                if std::env::var_os("RVT_MESH_STATS").is_some() && entry.1 <= 4 {
-                    eprintln!("  no saved graphics: {name} {} cat {} class {class} {}#{}", e.id, e.category, e.partition, e.chain);
-                }
-            }
-            None => {}
         }
     }
     saved
@@ -1179,6 +1238,13 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
     // group is none of the type's placed groups (Revit API: snowdon arch 2025 282/282 members of
     // groups outside GroupType.Groups and outside the Group collector; rac_basic fixture 800336, rme
     // 6 pipe insulations: absent from Revit's {3D} geometry).
+    let t_mesh = std::time::Instant::now();
+    let timing = std::env::var_os("RVT_MESH_TIMING").is_some();
+    let tick = |what: &str| {
+        if timing {
+            eprintln!("mesh timing {:>8.2}s after {what}", t_mesh.elapsed().as_secs_f64());
+        }
+    };
     let mut group_defs = doc.group_definition_ids();
     // Step 2260: demolished elements (Phase Demolished set) are not shown in a {3D} view of the last
     // phase with 'Show Complete' (snowdon arch 2025: 6 legend floors, created = demolished = 'Legends';
@@ -1195,16 +1261,23 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
         let inplace = doc.inplace_ids();
         doc.walls().into_iter().filter(|w| seen.insert(w.id) && !inplace.contains(&w.id) && !group_defs.contains(&w.id)).collect::<Vec<_>>()
     };
-    // step 2304: the saved-graphics batches, on their own thread (merged at the end)
-    let saved_job = std::env::var_os("RVT_NO_SAVED").is_none().then(|| {
+    // step 2304: the saved-graphics batches, on their own thread (merged at the end); step 2306:
+    // the batches they replace are known now, and the readers below skip them
+    let mut replaced: std::collections::HashSet<&'static str> = Default::default();
+    let mut saved_job = None;
+    if let Some(sg) = std::env::var_os("RVT_NO_SAVED").is_none().then(|| doc.saved_graphics()).flatten() {
         let mut skip = group_defs.clone();
         // walls without a compound type are drawn by their panels (step 2215)
         skip.extend(walls_all.iter().filter(|w| doc.type_thickness(w.wall_type).map_or(true, |t| t <= 0.0)).map(|w| w.id));
         // members of in-place families are drawn by the family instance (racbasic 2026: walls
         // 628450–628456, 4000 ft² not in Revit's view)
         skip.extend(doc.inplace_ids());
-        sc.spawn(move || saved_batches(doc, &skip))
-    });
+        let cands = saved_candidates(doc, sg, &skip);
+        replaced = saved_plan(sg, &cands);
+        saved_job = Some(sc.spawn(move || saved_batches(doc, cands)));
+    }
+    let want = |name: &str| !replaced.contains(name);
+    tick("saved plan");
     // step 2228: an element can appear in two project chains (Storax: 366 copies in a second chain,
     // mostly without a type); keep one record per id, the one with a type
     let insts_all: Vec<Instance> = {
@@ -1228,14 +1301,25 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
         }
         by_id
     };
+    tick("readers walls/instances");
     let mut batches: BTreeMap<&'static str, Batch> = BTreeMap::new();
     fn get<'a>(m: &'a mut BTreeMap<&'static str, Batch>, name: &'static str, color: [f32; 3]) -> &'a mut Batch {
         m.entry(name).or_insert_with(|| Batch::new(name, color))
     }
+    // a batch that saved graphics replace collects into a discard batch (step 2306)
+    let mut sink = Batch::new("replaced", [0.0; 3]);
     macro_rules! batch {
-        ($name:expr, $color:expr) => {
-            get(&mut batches, $name, $color)
-        };
+        ($name:expr, $color:expr) => {{
+            let name: &'static str = $name;
+            if replaced.contains(name) {
+                sink.positions.clear();
+                sink.normals.clear();
+                sink.indices.clear();
+                &mut sink
+            } else {
+                get(&mut batches, name, $color)
+            }
+        }};
     }
 
     // Curtain panels and mullions (step 2215): their stored boxes are the real panel/mullion extents
@@ -1255,7 +1339,7 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
     for a in doc.wall_attachments().into_iter().filter(|a| a.flag == 1) {
         attach_top.entry(a.id).or_default().push(a.target);
     }
-    let target_tris: std::collections::HashMap<i64, Vec<[P3; 3]>> = {
+    let target_tris: std::collections::HashMap<i64, Vec<[P3; 3]>> = if !want("Walls") { Default::default() } else {
         let want: std::collections::HashSet<i64> = attach_top.values().flatten().copied().collect();
         let mut m = std::collections::HashMap::new();
         if !want.is_empty() {
@@ -1276,8 +1360,9 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
         }
         m
     };
+    tick("attach targets");
     // step 2236: door/window openings per host wall: (u0, u1, z0, z1) along the wall line
-    let openings: std::collections::HashMap<u64, Vec<(f64, f64, f64, f64)>> = {
+    let openings: std::collections::HashMap<u64, Vec<(f64, f64, f64, f64)>> = if !want("Walls") { Default::default() } else {
         let wall_line: std::collections::HashMap<u64, (P3, P3)> = walls_all.iter().map(|w| (w.id, (w.p0, w.p1))).collect();
         let cat: std::collections::HashMap<u64, i32> = insts_all.iter().map(|i| (i.id, i.cat)).collect();
         let mut m: std::collections::HashMap<u64, Vec<(f64, f64, f64, f64)>> = std::collections::HashMap::new();
@@ -1399,8 +1484,9 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
         };
         b.indices[n0..].chunks_exact(3).map(|t| norm(cross(sub(p(t[1]), p(t[0])), sub(p(t[2]), p(t[0])))) / 2.0).sum()
     };
+    tick("openings");
     let mut prev_wall: Option<(u64, usize)> = None;
-    for w in walls_all.iter().cloned() {
+    for w in walls_all.iter().filter(|_| want("Walls")).cloned() {
         if dbg_walls {
             if let Some((id, n0)) = prev_wall.take() {
                 eprintln!("wall {id} {:.2}", wall_area(batches.get("Walls"), n0));
@@ -1530,6 +1616,7 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
     if let Some((id, n0)) = prev_wall.take() {
         eprintln!("wall {id} {:.2}", wall_area(batches.get("Walls"), n0));
     }
+    tick("walls");
     let slab = slab_into;
     for f in doc.floors().into_iter().filter(|f| !group_defs.contains(&f.id)) {
         let t = f.thickness.filter(|t| *t > 0.0).unwrap_or(0.5);
@@ -1559,6 +1646,7 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
         slab(batch!("Roofs", [0.60, 0.30, 0.18]), &cs, Some(bb[5]), t, true);
     }
 
+    tick("floors ceilings roofs");
     let segs: Vec<Segment> = doc.segments().into_iter().filter(|s| !group_defs.contains(&s.id)).collect();
     for s in &segs {
         let cat = doc.element(s.id).map(|e| e.category);
@@ -1594,6 +1682,7 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
     // Stairs (§33): per run, one block per tread along the walk path, each a riser high and as wide
     // as the run (step 722; 3 ft if unknown), rising by one riser per tread from the run's base
     // elevation (absolute, step 2211), or from the stair base counted over the runs.
+    tick("mep");
     let stairs: Vec<_> = doc.stairs().into_iter().filter(|s| !group_defs.contains(&s.id)).collect();
     let runs: std::collections::HashMap<u64, rvt_model::StairsRun> = doc.stairs_runs().into_iter().map(|r| (r.id, r)).collect();
     for st in &stairs {
@@ -1780,6 +1869,8 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
             batch!("Stairs", [0.70, 0.66, 0.60]).hexa(bot, top);
         }
     }
+    tick("stairs");
+    if want("Slab edges")
     // Slab edges (step 2284; cat −2001392): the type's profile family sketch (the first symbol the
     // type references), sized by the type: an axis whose sketch extent equals a current value of
     // the profile family takes the symbol's value of the same parameter name (snowdon 'X' 0.0667 →
@@ -1860,6 +1951,8 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
             }
         }
     }
+    tick("slab edges");
+    if want("Wall sweeps")
     // Wall sweeps (step 2272; cat −2000181, S719 + segments): per straight segment a rectangular
     // section, as high as the stored box (sweeps run level) and as wide as the type's profile (its
     // profile family's sketch, the symbol @155 of the sweep type), else the stored box across a
@@ -1965,6 +2058,7 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
             }
         }
     }
+    tick("wall sweeps");
     // Topography (step 2233): Delaunay triangulation of the terrain points in plan, like Revit
     // regenerates the surface from its points.
     // step 2233: hidden group type definition copies (rac_basic: a second terrain over the same area)
@@ -2051,6 +2145,7 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
         let b = batch!("Pads", [0.66, 0.60, 0.52]);
         b.prism(loops, top - th, *top);
     }
+    tick("topo pads");
     // Wall foundations (step 2256; class 918, category Structural Foundations): a footing under its
     // wall. The wall is the one whose line lies in the footing's stored box and whose base meets its
     // top; the footing runs along that line over the box, as wide as the box across an axis-aligned
@@ -2121,6 +2216,7 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
             batch!("Structural foundations", [0.58, 0.56, 0.54]).hexa(bot, top);
         }
     }
+    tick("foundations");
     // Stair landings (step 2241): a component stair's landing has no geometry of its own in the
     // file, but its stored box matches Revit's landing (rac_basic 725396); a slab under the box top,
     // at most 1 ft thick (Revit 0.98 ft)
@@ -2218,14 +2314,15 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
             walk.extend(pieces.iter().map(|p| (base, WalkPiece { z0: p.z0 + base, z1: p.z1 + base, ..*p }, s, storeys, storey)));
         }
     }
+    tick("legacy stairs");
     let stair_by_id: std::collections::HashMap<u64, &Stair> = stairs.iter().map(|s| (s.id, s)).collect();
 
     let bits32 = doc.info().bits == Some(32);
     // Step 2285: top rails and handrails are their own elements (path + type profile, drawn
     // below); a railing with a real top rail keeps only its posts here
-    let rails: Vec<rvt_model::Rail> = doc.rails().into_iter().filter(|r| !group_defs.contains(&r.id)).collect();
+    let rails: Vec<rvt_model::Rail> = if want("Railings") { doc.rails().into_iter().filter(|r| !group_defs.contains(&r.id)).collect() } else { Vec::new() };
     let with_top_rail: std::collections::HashSet<u64> = rails.iter().filter(|r| r.cat == -2000946).filter_map(|r| r.host).collect();
-    for r in doc.railings().into_iter().filter(|r| !group_defs.contains(&r.id)) {
+    for r in if want("Railings") { doc.railings() } else { Vec::new() }.into_iter().filter(|r| !group_defs.contains(&r.id)) {
         let info = r.type_info.as_ref();
         // step 2204: 64-bit top rail height first (Railing Height is 0 for some types); 32-bit
         // Railing Height first (its top rail fields read as 4.0 / type 4 there)
@@ -2364,11 +2461,19 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
         }
     }
 
+    tick("railings");
+    // step 2306: instances whose batch saved graphics replace are not built (nor their families read)
+    let inst_batch = |cat: i32| match cat {
+        -2001360 => "Planting",
+        -2001370 => "Entourage",
+        c => instance_batch(c).0,
+    };
+    let need_inst = insts_all.iter().any(|i| want(inst_batch(i.cat)));
     let insts: &[Instance] = &insts_all;
     // Family geometry (§8.11, steps 2214–2216): extrusion solids of the instance's family, used when
     // they cover the element's stored box (±0.15 ft); otherwise the box itself.
-    let symbol_family = doc.symbol_family();
-    let family_chain = doc.family_chains();
+    let symbol_family = if need_inst { doc.symbol_family() } else { Default::default() };
+    let family_chain = if need_inst { doc.family_chains() } else { Default::default() };
     let adaptive_chains: std::collections::HashSet<(String, usize)> =
         doc.elements().filter(|e| e.category == -2000710).map(|e| (e.partition, e.chain)).collect();
     // step 2296: family chains holding a sample host wall (wall-based templates; a project chain is
@@ -2379,29 +2484,25 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
     // slot = the GroupType, as in projects, step 2233); rac_basic 2026 solar panel: an arrayed cell's
     // copy 4 ft beside the panel. Those forms are not drawn.
     // (the form lists hold family chains only, so the ids of every chain can be used)
-    let fam_group_defs: std::collections::HashSet<u64> = doc
-        .group_definition_members_by_chain()
+    let fam_group_defs: std::collections::HashSet<u64> = (if need_inst { doc.group_definition_members_by_chain() } else { Vec::new() })
         .into_iter()
         .flat_map(|(_, _, v)| v.into_iter().map(|m| m.id))
         .collect();
-    let chain_solids: std::collections::HashMap<(String, usize), Vec<ExtrusionSolid>> = doc
-        .family_solids_by_chain()
+    let chain_solids: std::collections::HashMap<(String, usize), Vec<ExtrusionSolid>> = (if need_inst { doc.family_solids_by_chain() } else { Vec::new() })
         .into_iter()
         .map(|(st, ix, mut v)| {
             v.retain(|s| !fam_group_defs.contains(&s.id));
             ((st, ix), v)
         })
         .collect();
-    let chain_sweeps: std::collections::HashMap<(String, usize), Vec<SweepSolid>> = doc
-        .family_sweeps_by_chain()
+    let chain_sweeps: std::collections::HashMap<(String, usize), Vec<SweepSolid>> = (if need_inst { doc.family_sweeps_by_chain() } else { Vec::new() })
         .into_iter()
         .map(|(st, ix, mut v)| {
             v.retain(|s| !fam_group_defs.contains(&s.id));
             ((st, ix), v)
         })
         .collect();
-    let chain_blrev: std::collections::HashMap<(String, usize), (Vec<BlendSolid>, Vec<RevolveSolid>)> = doc
-        .family_blends_revolves_by_chain()
+    let chain_blrev: std::collections::HashMap<(String, usize), (Vec<BlendSolid>, Vec<RevolveSolid>)> = (if need_inst { doc.family_blends_revolves_by_chain() } else { Vec::new() })
         .into_iter()
         .map(|(st, ix, mut b, mut r)| {
             b.retain(|x| !fam_group_defs.contains(&x.id));
@@ -2423,7 +2524,7 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
     } else {
         doc.type_values_by_chain().into_iter().flat_map(|(_, _, m)| m.into_iter()).collect()
     };
-    let vis_names = if vis_assoc.is_empty() { Default::default() } else { doc.parameter_names_global() };
+    let vis_names = if vis_assoc.is_empty() { Default::default() } else { if need_inst { doc.parameter_names_global() } else { Default::default() } };
     let hidden_cache: std::cell::RefCell<std::collections::HashMap<((String, usize), Option<u64>, Option<u64>), std::rc::Rc<std::collections::HashSet<u64>>>> = Default::default();
     // step 2283: `host` = the type of the family a nested instance sits in; its value counts when
     // the nested type has none (snowdon canopy type 'Include Dome' 0, linked through the nested
@@ -2511,10 +2612,10 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
     // step 2227: family shapes per symbol are computed once (many instances share a type)
     // Step 2246 (§10): nested families. Instances inside a family document (placed in the host
     // family's coordinates) add their own family's forms, recursively (depth ≤ 3).
-    let nested_symbol_family = doc.nested_symbol_family();
-    let nested_family_chain = doc.nested_family_chains();
+    let nested_symbol_family = if need_inst { doc.nested_symbol_family() } else { Default::default() };
+    let nested_family_chain = if need_inst { doc.nested_family_chains() } else { Default::default() };
     let chain_insts: std::collections::HashMap<(String, usize), Vec<Instance>> =
-        doc.family_chain_instances()
+        (if need_inst { doc.family_chain_instances() } else { Vec::new() })
             .into_iter()
             .map(|(st, ix, mut v)| {
                 for i in v.iter_mut() {
@@ -2579,7 +2680,7 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
     }
     let mut shape_cache: std::collections::HashMap<u64, std::rc::Rc<Vec<Vec<[P3; 3]>>>> = std::collections::HashMap::new();
     let mut plain_count: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
-    let linked = doc.sub_component_links();
+    let linked = if need_inst { doc.sub_component_links() } else { Default::default() };
     // Step 2262: hosts of shared nested components: a linked instance whose stored box contains
     // another linked instance's box. Their stored box is the union with the components (snowdon
     // kitchen unit 908758: 8.5 × 4.9 × 5.3 ft, its own forms 4.5 × 2.1 × 2.8 ft = Revit's), so it
@@ -2596,11 +2697,11 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
             .map(|(i, _)| *i)
             .collect()
     };
-    let columns: std::collections::HashMap<u64, rvt_model::Column> = doc.columns().into_iter().map(|c| (c.id, c)).collect();
+    let columns: std::collections::HashMap<u64, rvt_model::Column> = (if need_inst { doc.columns() } else { Default::default() }).into_iter().map(|c| (c.id, c)).collect();
     // Step 2253: column type sizes. Type values per symbol (with the project chain for parameter
     // names) and, per family chain, its value sets (the family's types).
     let mut sym_values: std::collections::HashMap<u64, (rvt_model::ValueSet, (String, usize))> = std::collections::HashMap::new();
-    for (st, ix, tv) in doc.type_values_by_chain() {
+    for (st, ix, tv) in if need_inst { doc.type_values_by_chain() } else { Vec::new() } {
         for (k, v) in tv {
             sym_values.insert(k, (v, (st.clone(), ix)));
         }
@@ -2664,7 +2765,7 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
     // 906914: type 30" = 2.5 ft wide, the forms are the family's 36" = 3.0 ft). Scaled about the
     // family origin. Tried per instance before the other routes, and kept only when the scaled
     // shape lies in the stored box (±0.15 ft; rme face-based air terminals: no 'Height' along z).
-    let global_names = doc.parameter_names_global();
+    let global_names = if need_inst { doc.parameter_names_global() } else { Default::default() };
     let typed: std::cell::RefCell<std::collections::HashMap<u64, [f64; 3]>> = Default::default();
     let current_cache: std::cell::RefCell<std::collections::HashMap<(String, usize), Option<rvt_model::ValueSet>>> = Default::default();
     let sizes = |set: &rvt_model::ValueSet, names: &std::collections::HashMap<u64, Option<String>>| -> [Option<f64>; 3] {
@@ -2744,7 +2845,7 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
         .iter()
         .map(|w| (w.id as i64, (w.p0, w.p1, doc.type_thickness(w.wall_type).filter(|t| *t > 0.0).unwrap_or(0.5))))
         .collect();
-    let host_of: std::collections::HashMap<u64, i64> = doc.hosted().into_iter().filter_map(|h| h.host.map(|x| (h.id, x))).collect();
+    let host_of: std::collections::HashMap<u64, i64> = (if need_inst { doc.hosted() } else { Default::default() }).into_iter().filter_map(|h| h.host.map(|x| (h.id, x))).collect();
     // Step 2257: a door or window family keeps its template's host wall (rme: 300 mm); its frame is
     // drawn against that wall's faces. Per family chain: the wall's normal (plan), centre offset and
     // width, when the family has exactly one host wall.
@@ -2774,7 +2875,8 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
             }
         }
     };
-    'inst: for i in insts.iter().filter(|i| i.scale.is_none() && i.origin.is_some()) {
+    tick("family precompute");
+    'inst: for i in insts.iter().filter(|i| i.scale.is_none() && i.origin.is_some() && want(inst_batch(i.cat))) {
         if dbg_inst {
             if let Some(pv) = prev_inst.take() {
                 report(&batches, &pv);
@@ -3488,21 +3590,23 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
         }
     }
 
+    tick("instances");
     // open-research step 2304: Revit's own saved graphics (Revit 2024+ files), meshed alongside
     // the readers above. A batch is replaced by them when every element drawn in it has them
     // (racbasic 2026: all 28 categories within 1% of Revit's area, every element box exact);
     // otherwise the batch stays as built above.
     if let Some(job) = saved_job {
-        for (name, (b, missing)) in job.join().unwrap_or_default() {
+        for (name, b) in job.join().unwrap_or_default() {
             if std::env::var_os("RVT_MESH_STATS").is_some() {
-                eprintln!("saved {name}: {} triangles, {missing} elements without", b.indices.len() / 3);
+                eprintln!("saved {name}: {} triangles{}", b.indices.len() / 3, if replaced.contains(name) { "" } else { " (not used)" });
             }
-            if missing == 0 && !b.indices.is_empty() {
+            if replaced.contains(name) {
                 batches.insert(name, b);
             }
         }
     }
 
+    tick("saved join");
     if std::env::var_os("RVT_MESH_STATS").is_some() {
         eprintln!("instances: {n_family} with family geometry, {n_box} as box");
         let mut v: Vec<_> = box_by_cat.iter().collect();
