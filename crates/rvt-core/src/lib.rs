@@ -5,6 +5,7 @@
 
 pub mod cfb;
 pub mod chain;
+pub mod graph;
 pub mod records;
 pub mod schema;
 pub mod tags;

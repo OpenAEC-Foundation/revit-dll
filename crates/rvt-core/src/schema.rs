@@ -96,6 +96,23 @@ impl Schema {
         self.by_name.get(name).copied()
     }
 
+    /// Whether class `tag` is the class named `name` or derives from it.
+    pub fn is_a(&self, tag: u16, name: &str) -> bool {
+        let mut t = Some(tag);
+        let mut n = 0;
+        while let Some(c) = t.and_then(|t| self.class(t)) {
+            if c.name == name {
+                return true;
+            }
+            t = c.parent;
+            n += 1;
+            if n > 64 {
+                break;
+            }
+        }
+        false
+    }
+
     /// The fields of a class and its ancestors, base class first.
     pub fn all_fields(&self, tag: u16) -> Vec<(&Class, &Field)> {
         let mut chain = Vec::new();

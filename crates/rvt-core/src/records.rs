@@ -9,6 +9,7 @@
 //!   four zero) closes a content block and carries nothing else;
 //! - `SegmentCheckback`: `u32` segment size;
 //! - `ContentMarker`: `u32` content-key token (non-zero: `u16` class tag + 16-byte key), `u32` count;
+//!   a keyless one with count −1 ends the partition (other data follows);
 //! - `SignatureMarker`: `u32 n` + `n` bytes, `u32 m` + `m` UTF-16 code units.
 //! Continuation bit 1: the segment continues the previous one, bit 2: it continues into the next;
 //! continued segments form one group. A group is a run of records: `u64` element id, a header
@@ -80,7 +81,12 @@ pub fn channel_records(raw: &[u8], m: Markers, channel: u64, main_only: bool) ->
             p += 4;
         } else if t == m.content {
             let tok = le_u32(raw, p)?;
-            p += 4 + if tok != 0 { 18 } else { 0 } + 4;
+            p += 4 + if tok != 0 { 18 } else { 0 };
+            // a count of −1 closes the partition (rst 2026 Partitions/21: ~58 bytes of other data follow)
+            if le_u32(raw, p)? == u32::MAX {
+                break;
+            }
+            p += 4;
             content += 1;
         } else if Some(t) == m.signature {
             let nb = le_u32(raw, p)? as usize;
