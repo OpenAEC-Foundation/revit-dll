@@ -8,7 +8,7 @@
 //! GUID (16 B), 11 i64, 13 nested (the inner descriptor per element), 14 object: modifier low
 //! nibble 0 inline (the field's class), 1..=3 a pointer: `u32` token, then (non-zero token, not
 //! external = 3) the target's `u16` class tag; targets are decoded after the current object, in
-//! order of appearance, once per token. Modifier 0x10..=0x13: fixed array of the field's count,
+//! order of appearance, once per token (0xffffffff never shared). Modifier 0x10..=0x13: fixed array of the field's count,
 //! 0x50..=0x53: vector with a `u32` count.
 
 use std::collections::HashMap;
@@ -145,9 +145,6 @@ impl Decoder<'_> {
         if std::env::var("RVT_GRAPH_TRACE").is_ok() {
             eprintln!("obj {} at {}", s.class(tag).map_or("?", |c| c.name.as_str()), self.p);
         }
-        // open (step 2302): a GBiFlipControl in door 505854 is 2 bytes longer than its fields
-        // (`c0 00` before its GInfo); a general GControl prefix makes more records fail (8151 →
-        // 8138 of 8402 exact), so the cause is elsewhere
         let mut fields: Vec<(String, Value)> = Vec::new();
         for (_, f) in s.all_fields(tag) {
             let flags = f.flags();
@@ -160,6 +157,9 @@ impl Decoder<'_> {
                 e => e,
             })?;
             self.trail.pop();
+            if std::env::var("RVT_GRAPH_TRACE").is_ok() && f.name == "m_flags" && s.class(tag).is_some_and(|c| c.name == "GInfo") {
+                eprintln!("   GInfo.m_flags {:?} ends {}", v.as_i64().map(|x| format!("{x:#x}")), self.p);
+            }
             if !fields.iter().any(|(n, _)| *n == f.name) {
                 fields.push((f.name.clone(), v));
             }
@@ -214,7 +214,12 @@ impl Decoder<'_> {
                     Value::Ptr(None)
                 } else {
                     let tag = self.u16()?;
-                    let idx = match self.tokens.get(&token) {
+                    if std::env::var("RVT_GRAPH_TRACE").is_ok() {
+                        eprintln!("   ptr token {token} -> {} {}", self.s.class(tag).map_or("?", |c| c.name.as_str()), if self.tokens.contains_key(&token) { "(seen)" } else { "" });
+                    }
+                    // token 0xffffffff is never shared: every such pointer has its own target
+                    // (racbasic 2026 symbol 978910: five GConditionDir; rvt-rs does the same)
+                    let idx = match self.tokens.get(&token).filter(|_| token != u32::MAX) {
                         Some(&i) => i,
                         None => {
                             self.queue.push((tag, token));
