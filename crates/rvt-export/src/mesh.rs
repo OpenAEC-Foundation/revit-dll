@@ -1845,8 +1845,19 @@ pub fn scene(doc: &Document) -> Scene {
                 // face) outward, its top at the box top (GT 638678: 0.208 × 1.458 ft, both exact)
                 if let Some(prof) = &profile {
                     let (xlo, yhi) = prof.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), q| (l.min(q[0]), h.max(q[1])));
-                    // away from the wall line (GT 638678: path on the wall face, profile outside it)
-                    let out = mul(n, -1.0);
+                    // the side: away from the wall line (facades 638678: path on the wall face,
+                    // profile outside) or towards it (snowdon arch coping 1975545: path on the wall
+                    // top's edge, profile over the wall); the one whose plan extent best matches the
+                    // stored box
+                    let xhi = prof.iter().fold(f64::NEG_INFINITY, |h, q| h.max(q[0]));
+                    let err = |sg: f64| -> f64 {
+                        let o = mul(n, sg);
+                        let pts = [*a, *b, add(*a, mul(o, xhi - xlo)), add(*b, mul(o, xhi - xlo))];
+                        let (lo, hi) = pts.iter().fold(([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]), |(l, h), q| ([l[0].min(q[0]), l[1].min(q[1])], [h[0].max(q[0]), h[1].max(q[1])]));
+                        // how far the candidate sticks out of the box (the right side stays inside)
+                        (0..2).map(|k| (bb[k] - lo[k]).max(0.0) + (hi[k] - bb[k + 3]).max(0.0)).sum::<f64>()
+                    };
+                    let out = if err(-1.0) <= err(1.0) { mul(n, -1.0) } else { n };
                     let pts = vec![rvt_model::Curve { kind: "line", p0: Some(*a), p1: Some(*b), ..Default::default() }];
                     sweep_profile(batch!("Wall sweeps", [0.80, 0.78, 0.74]), &pts, prof, |pt, _d, q| Some([pt[0] + out[0] * (q[0] - xlo), pt[1] + out[1] * (q[0] - xlo), bb[5] - (yhi - q[1])]));
                     continue;
