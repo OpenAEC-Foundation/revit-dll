@@ -1197,6 +1197,39 @@ pub fn scene(doc: &Document) -> Scene {
             let (u0, u1) = (us.iter().copied().fold(f64::INFINITY, f64::min), us.iter().copied().fold(f64::NEG_INFINITY, f64::max));
             m.entry(host).or_default().push((u0, u1, bb[2], bb[5]));
         }
+        // step 2286: an embedded curtain wall (a straight wall without a compound type on the line
+        // of a straight basic wall, within its length) cuts its extent out of the host (snowdon
+        // 735573, 40.8 × 24.25 ft: curtain wall 1700768 40.2 × 17.5 inside, GT 685 ft² = both faces
+        // less the opening; 1047581 and 1184003 alike)
+        let zrange = |w: &rvt_model::Wall| -> (f64, f64) {
+            let base = doc.level_elevation(w.base_level).map(|z| z + w.base_offset).unwrap_or(w.p0[2]);
+            (base, base + w.height.filter(|h| *h > 0.0 && h.is_finite()).unwrap_or(10.0))
+        };
+        let curtains: Vec<&rvt_model::Wall> = walls_all.iter().filter(|w| w.curve.is_none() && doc.type_thickness(w.wall_type).is_none()).collect();
+        if !curtains.is_empty() {
+            for h in walls_all.iter().filter(|w| w.curve.is_none()) {
+                let Some(t) = doc.type_thickness(h.wall_type).filter(|t| *t > 0.0) else { continue };
+                let a = [h.p0[0], h.p0[1], 0.0];
+                let Some(d) = unit(sub([h.p1[0], h.p1[1], 0.0], a)) else { continue };
+                let len = norm(sub([h.p1[0], h.p1[1], 0.0], a));
+                let (hz0, hz1) = zrange(h);
+                for c in &curtains {
+                    let rel = |p: P3| sub([p[0], p[1], 0.0], a);
+                    let off = |p: P3| (rel(p)[0] * d[1] - rel(p)[1] * d[0]).abs();
+                    if off(c.p0) > t / 2.0 + 0.05 || off(c.p1) > t / 2.0 + 0.05 {
+                        continue;
+                    }
+                    let (u0, u1) = (dot(rel(c.p0), d).min(dot(rel(c.p1), d)), dot(rel(c.p0), d).max(dot(rel(c.p1), d)));
+                    let (cz0, cz1) = zrange(c);
+                    // clipped to the host's height (snowdon 1184003: curtain walls 0.74 ft above its top)
+                    let (cz0, cz1) = (cz0.max(hz0), cz1.min(hz1));
+                    if u0 < -0.1 || u1 > len + 0.1 || u1 - u0 < 0.1 || cz1 - cz0 < 0.1 {
+                        continue;
+                    }
+                    m.entry(h.id).or_default().push((u0, u1, cz0, cz1));
+                }
+            }
+        }
         m
     };
     // RVT_MESH_DEBUG_WALLS=1: surface (m²) drawn per wall, for comparison with Revit
