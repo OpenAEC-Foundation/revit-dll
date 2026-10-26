@@ -700,6 +700,18 @@ pub struct SlabEdge {
     pub segments: Vec<Curve>,
 }
 
+/// Top rail or handrail (step 2285; cat −2000946 / −2000947): its type, host railing and path
+/// (the pieces of the path element it references, class 3140; snowdon arch 2025 handrail 621419:
+/// path 621421, 10 lines, the rail's top runs on it).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Rail {
+    pub id: u64,
+    pub cat: i32,
+    pub rail_type: Option<u64>,
+    pub host: Option<u64>,
+    pub path: Vec<Curve>,
+}
+
 /// Stairs run type (step 2276; StairsRunType, cat −2000919): flags and sizes (API IsMonolithic,
 /// HasTreads, HasRisers, StructuralDepth, TreadThickness, RiserThickness, NosingLength).
 #[derive(Debug, Clone, Serialize, PartialEq)]

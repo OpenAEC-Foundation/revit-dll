@@ -83,6 +83,133 @@ fn adaptive_rib(b: &mut Batch, pts: &[P3], drop: &[f64]) {
     }
 }
 
+/// Steps 2284/2285: the profile of a sweep type (slab edge, rail): the sketch of the profile family
+/// the type references first (an i64, else an i32 in 2019 and older) as one loop (arcs in 6 steps
+/// from centre, axes, radius and parameters), sized per axis by the type: the current value equal to
+/// the sketch extent takes the symbol's value of the same parameter name.
+fn type_profile(
+    doc: &Document,
+    t: u64,
+    fam_of: &std::collections::HashMap<u64, u64>,
+    fam_chain: &std::collections::BTreeMap<u64, (String, usize)>,
+    gnames: &std::collections::HashMap<u64, Option<String>>,
+    rows: &std::collections::HashMap<u64, rvt_model::ValueSet>,
+) -> Option<Vec<[f64; 2]>> {
+    let b = doc.element_body(t)?;
+    let sym_of = |v: i64| (v > 0).then(|| fam_of.get(&(v as u64)).and_then(|f| fam_chain.get(f)).map(|k| (v as u64, k.clone()))).flatten();
+    // an i64 reference, else (2019 and older) an i32
+    let (sym, key) = (0..b.len().saturating_sub(8))
+        .find_map(|o| sym_of(i64_at_le(&b, o)))
+        .or_else(|| (0..b.len().saturating_sub(4)).find_map(|o| sym_of(i32::from_le_bytes(b[o..o + 4].try_into().unwrap()) as i64)))?;
+    // the sketch as one loop: each curve a polyline (an arc in 6 steps from its centre,
+    // axes, radius and parameters; snowdon type 909838: 4 fillet arcs without end points)
+    let mut segs: Vec<Vec<[f64; 2]>> = doc
+        .chain_curves(&key.0, key.1)
+        .into_iter()
+        .filter_map(|(_, c)| match (c.kind, c.center, c.x, c.y, c.r, c.t0, c.t1) {
+            ("arc", Some(cc), Some(x), Some(y), Some(r), Some(t0), Some(t1)) => Some(
+                (0..=6)
+                    .map(|j| {
+                        let t = t0 + (t1 - t0) * j as f64 / 6.0;
+                        [cc[0] + r * (t.cos() * x[0] + t.sin() * y[0]), cc[1] + r * (t.cos() * x[1] + t.sin() * y[1])]
+                    })
+                    .collect(),
+            ),
+            // step 2285: a closed ellipse or circle (snowdon rail type 1607960: ellipse 0.125 × 0.094
+            // round the path) in 24 steps
+            ("ellipse" | "circle", Some(cc), Some(x), Some(y), ..) => {
+                let (rx, ry) = (c.rx.or(c.r)?, c.ry.or(c.r)?);
+                Some(
+                    (0..=24)
+                        .map(|j| {
+                            let t = std::f64::consts::TAU * j as f64 / 24.0;
+                            [cc[0] + rx * t.cos() * x[0] + ry * t.sin() * y[0], cc[1] + rx * t.cos() * x[1] + ry * t.sin() * y[1]]
+                        })
+                        .collect(),
+                )
+            }
+            _ => Some(vec![[c.p0?[0], c.p0?[1]], [c.p1?[0], c.p1?[1]]]),
+        })
+        .collect();
+    let mut poly = segs.pop()?;
+    let near = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() < 1e-5 && (a[1] - b[1]).abs() < 1e-5;
+    while !segs.is_empty() {
+        let last = *poly.last().unwrap();
+        let k = segs.iter().position(|v| near(v[0], last) || near(*v.last().unwrap(), last))?;
+        let mut v = segs.remove(k);
+        if !near(v[0], last) {
+            v.reverse();
+        }
+        poly.extend(v.into_iter().skip(1));
+    }
+    if near(poly[0], *poly.last().unwrap()) {
+        poly.pop();
+    }
+    if poly.len() < 3 {
+        return None;
+    }
+    // size by the type: per axis the current value equal to the sketch extent
+    let (lo, hi) = poly.iter().fold(([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]), |(l, h), q| ([l[0].min(q[0]), l[1].min(q[1])], [h[0].max(q[0]), h[1].max(q[1])]));
+    let cur = doc.family_current_values(&key.0, key.1);
+    let names = doc.parameter_names_of(&key.0, key.1);
+    let scale = |k: usize| -> f64 {
+        let ext = hi[k] - lo[k];
+        let name = cur.as_ref().and_then(|c| c.rows.iter().find(|r| r.param > 0 && (r.num - ext).abs() < 1e-6)).and_then(|r| names.get(&(r.param as u64)).cloned().flatten());
+        let v = name.and_then(|n| rows.get(&sym).and_then(|vs| vs.rows.iter().find(|r| r.param > 0 && gnames.get(&(r.param as u64)).cloned().flatten().as_deref() == Some(n.as_str()))).map(|r| r.num));
+        v.filter(|v| *v > 1e-6 && ext > 1e-9).map_or(1.0, |v| v / ext)
+    };
+    let (sx, sy) = (scale(0), scale(1));
+    Some(poly.into_iter().map(|q| [q[0] * sx, q[1] * sy]).collect())
+}
+
+/// Step 2285: a closed 2-D profile swept along path pieces (lines; arcs sampled at ≤ 0.5 ft), the
+/// profile point placed by `frame(point, tangent, (x, y))`; sides as quads, both ends capped by a fan.
+fn sweep_profile(b: &mut Batch, path: &[rvt_model::Curve], prof: &[[f64; 2]], frame: impl Fn(P3, P3, [f64; 2]) -> Option<P3>) {
+    let k = prof.len();
+    if k < 3 {
+        return;
+    }
+    let c = prof.iter().fold([0.0, 0.0], |a, q| [a[0] + q[0] / k as f64, a[1] + q[1] / k as f64]);
+    for cv in path {
+        let samples: Vec<(P3, P3)> = match (cv.kind, cv.p0, cv.p1, cv.center, cv.x, cv.y, cv.r, cv.t0, cv.t1) {
+            ("arc", _, _, Some(cc), Some(x), Some(y), Some(r), Some(t0), Some(t1)) => {
+                let n = (((t1 - t0) * r / 0.5).ceil() as usize).clamp(2, 128);
+                (0..=n)
+                    .map(|j| {
+                        let t = t0 + (t1 - t0) * j as f64 / n as f64;
+                        (add(cc, add(mul(x, r * t.cos()), mul(y, r * t.sin()))), add(mul(x, -t.sin()), mul(y, t.cos())))
+                    })
+                    .collect()
+            }
+            (_, Some(p0), Some(p1), ..) => match unit(sub(p1, p0)) {
+                Some(d) => vec![(p0, d), (p1, d)],
+                None => continue,
+            },
+            _ => continue,
+        };
+        for w in samples.windows(2) {
+            for j in 0..k {
+                let (p, q) = (prof[j], prof[(j + 1) % k]);
+                if let (Some(a0), Some(b0), Some(b1), Some(a1)) = (frame(w[0].0, w[0].1, p), frame(w[0].0, w[0].1, q), frame(w[1].0, w[1].1, q), frame(w[1].0, w[1].1, p)) {
+                    b.quad(a0, b0, b1, a1);
+                }
+            }
+        }
+        for (end, flip) in [(samples[0], false), (samples[samples.len() - 1], true)] {
+            for j in 0..k {
+                let (p, q) = (prof[j], prof[(j + 1) % k]);
+                if let (Some(cp), Some(pp), Some(qp)) = (frame(end.0, end.1, c), frame(end.0, end.1, p), frame(end.0, end.1, q)) {
+                    if flip {
+                        b.tri(cp, pp, qp);
+                    } else {
+                        b.tri(cp, qp, pp);
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn i64_at_le(b: &[u8], o: usize) -> i64 {
     i64::from_le_bytes(b[o..o + 8].try_into().expect("8 bytes"))
 }
@@ -945,6 +1072,8 @@ fn instance_batch(cat: i32) -> (&'static str, [f32; 3]) {
         -2000170 => ("Curtain panels", [0.62, 0.74, 0.82]),
         -2000171 => ("Curtain wall mullions", [0.55, 0.57, 0.60]),
         -2000151 => ("Generic models", [0.70, 0.68, 0.64]),
+        // step 2285: railing supports (handrail brackets) belong with the railings
+        -2000948 => ("Railings", [0.45, 0.47, 0.50]),
         _ => ("Other family instances", [0.66, 0.66, 0.68]),
     }
 }
@@ -1469,60 +1598,7 @@ pub fn scene(doc: &Document) -> Scene {
                 let Some(t) = e.edge_type else { continue };
                 let prof = profiles
                     .entry(t)
-                    .or_insert_with(|| {
-                        let b = doc.element_body(t)?;
-                        let sym_of = |v: i64| (v > 0).then(|| fam_of.get(&(v as u64)).and_then(|f| fam_chain.get(f)).map(|k| (v as u64, k.clone()))).flatten();
-                        // an i64 reference, else (2019 and older) an i32
-                        let (sym, key) = (0..b.len().saturating_sub(8))
-                            .find_map(|o| sym_of(i64_at_le(&b, o)))
-                            .or_else(|| (0..b.len().saturating_sub(4)).find_map(|o| sym_of(i32::from_le_bytes(b[o..o + 4].try_into().unwrap()) as i64)))?;
-                        // the sketch as one loop: each curve a polyline (an arc in 6 steps from its centre,
-                        // axes, radius and parameters; snowdon type 909838: 4 fillet arcs without end points)
-                        let mut segs: Vec<Vec<[f64; 2]>> = doc
-                            .chain_curves(&key.0, key.1)
-                            .into_iter()
-                            .filter_map(|(_, c)| match (c.kind, c.center, c.x, c.y, c.r, c.t0, c.t1) {
-                                ("arc", Some(cc), Some(x), Some(y), Some(r), Some(t0), Some(t1)) => Some(
-                                    (0..=6)
-                                        .map(|j| {
-                                            let t = t0 + (t1 - t0) * j as f64 / 6.0;
-                                            [cc[0] + r * (t.cos() * x[0] + t.sin() * y[0]), cc[1] + r * (t.cos() * x[1] + t.sin() * y[1])]
-                                        })
-                                        .collect(),
-                                ),
-                                _ => Some(vec![[c.p0?[0], c.p0?[1]], [c.p1?[0], c.p1?[1]]]),
-                            })
-                            .collect();
-                        let mut poly = segs.pop()?;
-                        let near = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() < 1e-5 && (a[1] - b[1]).abs() < 1e-5;
-                        while !segs.is_empty() {
-                            let last = *poly.last().unwrap();
-                            let k = segs.iter().position(|v| near(v[0], last) || near(*v.last().unwrap(), last))?;
-                            let mut v = segs.remove(k);
-                            if !near(v[0], last) {
-                                v.reverse();
-                            }
-                            poly.extend(v.into_iter().skip(1));
-                        }
-                        if near(poly[0], *poly.last().unwrap()) {
-                            poly.pop();
-                        }
-                        if poly.len() < 3 {
-                            return None;
-                        }
-                        // size by the type: per axis the current value equal to the sketch extent
-                        let (lo, hi) = poly.iter().fold(([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]), |(l, h), q| ([l[0].min(q[0]), l[1].min(q[1])], [h[0].max(q[0]), h[1].max(q[1])]));
-                        let cur = doc.family_current_values(&key.0, key.1);
-                        let names = doc.parameter_names_of(&key.0, key.1);
-                        let scale = |k: usize| -> f64 {
-                            let ext = hi[k] - lo[k];
-                            let name = cur.as_ref().and_then(|c| c.rows.iter().find(|r| r.param > 0 && (r.num - ext).abs() < 1e-6)).and_then(|r| names.get(&(r.param as u64)).cloned().flatten());
-                            let v = name.and_then(|n| rows.get(&sym).and_then(|vs| vs.rows.iter().find(|r| r.param > 0 && gnames.get(&(r.param as u64)).cloned().flatten().as_deref() == Some(n.as_str()))).map(|r| r.num));
-                            v.filter(|v| *v > 1e-6 && ext > 1e-9).map_or(1.0, |v| v / ext)
-                        };
-                        let (sx, sy) = (scale(0), scale(1));
-                        Some(poly.into_iter().map(|q| [q[0] * sx, q[1] * sy]).collect())
-                    })
+                    .or_insert_with(|| type_profile(doc, t, &fam_of, &fam_chain, &gnames, &rows))
                     .clone();
                 let Some(prof) = prof else { continue };
                 let b = batch!("Slab edges", [0.62, 0.60, 0.56]);
@@ -1901,6 +1977,10 @@ pub fn scene(doc: &Document) -> Scene {
     let stair_by_id: std::collections::HashMap<u64, &Stair> = stairs.iter().map(|s| (s.id, s)).collect();
 
     let bits32 = doc.info().bits == Some(32);
+    // Step 2285: top rails and handrails are their own elements (path + type profile, drawn
+    // below); a railing with a real top rail keeps only its posts here
+    let rails: Vec<rvt_model::Rail> = doc.rails().into_iter().filter(|r| !group_defs.contains(&r.id)).collect();
+    let with_top_rail: std::collections::HashSet<u64> = rails.iter().filter(|r| r.cat == -2000946).filter_map(|r| r.host).collect();
     for r in doc.railings().into_iter().filter(|r| !group_defs.contains(&r.id)) {
         let info = r.type_info.as_ref();
         // step 2204: 64-bit top rail height first (Railing Height is 0 for some types); 32-bit
@@ -1990,7 +2070,9 @@ pub fn scene(doc: &Document) -> Scene {
             let mut posts = pts.first().copied().into_iter().collect::<Vec<P3>>();
             let mut since = 0.0;
             for s in pts.windows(2) {
-                b.member(add(s[0], up), add(s[1], up), 0.15, 0.15, false);
+                if !with_top_rail.contains(&r.id) {
+                    b.member(add(s[0], up), add(s[1], up), 0.15, 0.15, false);
+                }
                 let len = norm(sub(s[1], s[0]));
                 let mut t = 3.0 - since;
                 while t < len {
@@ -2003,6 +2085,38 @@ pub fn scene(doc: &Document) -> Scene {
             for p in posts {
                 b.member(p, add(p, up), 0.08, 0.08, false);
             }
+        }
+    }
+
+    // Rails (step 2285; top rails −2000946, handrails −2000947): the type's profile swept along
+    // the path, the profile's x across (right of the path, horizontal), its y up (perpendicular to
+    // the path in its vertical plane): snowdon handrail 621419, circle r 0.0625 centred 0.0625 below
+    // the path, Revit's rail top on the path. Pieces are swept one by one, joints not mitred.
+    if !rails.is_empty() {
+        let fam_of = doc.symbol_family();
+        let fam_chain = doc.family_chains();
+        let gnames = doc.parameter_names_global();
+        let rows: std::collections::HashMap<u64, rvt_model::ValueSet> = doc.type_values_by_chain().into_iter().flat_map(|(_, _, m)| m.into_iter()).collect();
+        let mut profiles: std::collections::HashMap<u64, Option<Vec<[f64; 2]>>> = std::collections::HashMap::new();
+        let b = batch!("Railings", [0.45, 0.47, 0.50]);
+        for r in &rails {
+            let Some(t) = r.rail_type else { continue };
+            // a type without a profile family (snowdon 168367: no symbol, no sizes) gets a 1.5" round
+            // rail under the path (assumption; the file's most used rail profile, GT 0.332 ft²/ft
+            // against 0.393 for this circle)
+            let prof = profiles
+                .entry(t)
+                .or_insert_with(|| {
+                    type_profile(doc, t, &fam_of, &fam_chain, &gnames, &rows)
+                        .or_else(|| Some((0..24).map(|j| { let a = std::f64::consts::TAU * j as f64 / 24.0; [0.0625 * a.cos(), -0.0625 + 0.0625 * a.sin()] }).collect()))
+                })
+                .clone()
+                .unwrap_or_default();
+            sweep_profile(b, &r.path, &prof, |pt, d, q| {
+                let n = unit([d[1], -d[0], 0.0])?;
+                let up = unit(cross(n, d))?;
+                Some(add(add(pt, mul(n, q[0])), mul(up, q[1])))
+            });
         }
     }
 
@@ -2444,6 +2558,20 @@ pub fn scene(doc: &Document) -> Scene {
                     adaptive_rib(batch!(name, color), &pts, &drop);
                     n_family += 1;
                     continue;
+                }
+            }
+        }
+        // step 2285: a railing support (handrail bracket, cat −2000948) whose header flag after
+        // `ff ff fc ff ff ff ff ff ff ff` is 0 is not in the {3D} view (snowdon arch 2025: 980/980
+        // shown have 1, 1572 of 1628 not shown have 0; doors and fixtures shown have 0 too, so
+        // only supports)
+        if i.cat == -2000948 {
+            if let Some(b) = doc.element_body(i.id) {
+                let pat = [0xff, 0xff, 0xfc, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
+                if let Some(k) = b[..b.len().min(300)].windows(pat.len()).position(|w| w == pat) {
+                    if b.get(k + 10) == Some(&0) {
+                        continue;
+                    }
                 }
             }
         }

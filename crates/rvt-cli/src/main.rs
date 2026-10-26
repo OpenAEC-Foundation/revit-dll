@@ -18,6 +18,7 @@ const USAGE: &str = "usage:
   rvt type_values <file.rvt>           type values (value sets) per symbol
   rvt wall_sweeps <file.rvt>           wall sweeps and reveals (type, distance, host, path)
   rvt slab_edges <file.rvt>            slab edges (type, host floor, offsets, path segments)
+  rvt rails <file.rvt>                 top rails and handrails (type, host railing, path)
   rvt flex|mep_curves <file.rvt>       flex ducts; pipes, trays, conduits, flex pipes
   rvt columns <file.rvt>               columns: level block and height
   rvt inplace_members <file.rvt>       content of in-place families
@@ -176,6 +177,10 @@ fn run(args: &[String]) -> Result<Value, String> {
         "slab_edges" => {
             let doc = rvt_read::Document::open(path).map_err(err)?;
             Ok(json!({"slab_edges": doc.slab_edges()}))
+        }
+        "rails" => {
+            let doc = rvt_read::Document::open(path).map_err(err)?;
+            Ok(json!({"rails": doc.rails()}))
         }
         "type_values" => {
             let doc = rvt_read::Document::open(path).map_err(err)?;

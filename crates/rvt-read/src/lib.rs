@@ -366,6 +366,41 @@ impl Document {
         out
     }
 
+    /// Step 2285: top rails and handrails. The record references its type (same category, no
+    /// box), its railing (cat −2000126) and, last, the path element whose body holds the path pieces.
+    pub fn rails(&self) -> Vec<rvt_model::Rail> {
+        let mut out = Vec::new();
+        for cat in [-2000946, -2000947] {
+            for e in self.elements_in_category(cat) {
+                if e.bbox.is_none() {
+                    continue; // a type
+                }
+                let Some(b) = self.element_body(e.id) else { continue };
+                let mut seen = HashSet::new();
+                let refs: Vec<u64> = (0..b.len().saturating_sub(7)).map(|o| util::i64_at(&b, o)).filter(|&q| q > 0 && q as u64 != e.id).map(|q| q as u64).filter(|q| seen.insert(*q)).collect();
+                let info = |q: u64| self.element(q);
+                let rail_type = refs.iter().copied().find(|q| info(*q).is_some_and(|x| x.category == cat && x.bbox.is_none()));
+                let host = refs.iter().copied().find(|q| info(*q).is_some_and(|x| x.category == -2000126));
+                // the last referenced element with pieces: the centre line (snowdon class 3140 after
+                // the edge cache 929; rac 2026 class 3204 after the plan outline 947)
+                let path = refs
+                    .iter()
+                    .rev()
+                    .copied()
+                    .filter(|q| info(*q).is_some_and(|x| x.category == -1))
+                    .filter_map(|q| self.element_body(q))
+                    .map(|pb| path_pieces(&pb))
+                    .find(|v| !v.is_empty())
+                    .unwrap_or_default();
+                if path.is_empty() {
+                    continue;
+                }
+                out.push(rvt_model::Rail { id: e.id, cat, rail_type, host, path });
+            }
+        }
+        out
+    }
+
     /// Step 2284: elements of a design option that is not its set's primary (API: a {3D} view
     /// shows the primary options). An option set (cat −2006112) lists its options (cat −2006114)
     /// and names the primary last (snowdon arch 2025 'Bleacher Seating': 2059967, 2059970, primary
@@ -411,59 +446,7 @@ impl Document {
             if b.len() < 600 {
                 continue; // a type
             }
-            let unit3 = |o: usize| -> Option<[f64; 3]> {
-                let v = [f(&b, o), f(&b, o + 8), f(&b, o + 16)];
-                let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-                (n.is_finite() && (n - 1.0).abs() < 1e-6).then_some(v)
-            };
-            let pt3 = |o: usize| -> Option<[f64; 3]> {
-                let v = [f(&b, o), f(&b, o + 8), f(&b, o + 16)];
-                v.iter().all(|x| x.is_finite() && x.abs() < 1e6).then_some(v)
-            };
-            // arc at s: t0 t1, X, Y (unit, orthogonal), r, C
-            let arc = |s: usize| -> Option<rvt_model::Curve> {
-                if s + 96 > b.len() {
-                    return None;
-                }
-                let (t0, t1) = (f(&b, s), f(&b, s + 8));
-                let (x, y) = (unit3(s + 16)?, unit3(s + 40)?);
-                let r = f(&b, s + 64);
-                let c = pt3(s + 72)?;
-                let ok = t0.is_finite() && t1.is_finite() && t1 > t0 && t1 - t0 < 7.0 && t0.abs() < 20.0 && r.is_finite() && r > 1e-3 && r < 1e5 && (x[0] * y[0] + x[1] * y[1] + x[2] * y[2]).abs() < 1e-6;
-                let at = |t: f64| [c[0] + r * (t.cos() * x[0] + t.sin() * y[0]), c[1] + r * (t.cos() * x[1] + t.sin() * y[1]), c[2] + r * (t.cos() * x[2] + t.sin() * y[2])];
-                ok.then(|| rvt_model::Curve { kind: "arc", p0: Some(at(t0)), p1: Some(at(t1)), t0: Some(t0), t1: Some(t1), center: Some(c), x: Some(x), y: Some(y), r: Some(r), ..Default::default() })
-            };
-            // line at s: t0 t1, origin, unit direction
-            let line = |s: usize| -> Option<rvt_model::Curve> {
-                if s + 64 > b.len() {
-                    return None;
-                }
-                let (t0, t1) = (f(&b, s), f(&b, s + 8));
-                let (o, d) = (pt3(s + 16)?, unit3(s + 40)?);
-                let ok = t0.is_finite() && t1.is_finite() && t1 - t0 > 1e-4 && t1 - t0 < 1e4;
-                let at = |t: f64| [o[0] + t * d[0], o[1] + t * d[1], o[2] + t * d[2]];
-                ok.then(|| rvt_model::Curve { kind: "line", p0: Some(at(t0)), p1: Some(at(t1)), t0: Some(t0), t1: Some(t1), ..Default::default() })
-            };
-            // pieces are 84 (line) or 117 (arc) bytes apart; the longest chain of pieces, the last
-            // one on a tie (an arc is tried first: its X and Y also read as a line)
-            let piece = |s: usize| -> Option<(rvt_model::Curve, usize)> { arc(s).map(|c| (c, 117)).or_else(|| line(s).map(|c| (c, 84))) };
-            let mut best: Vec<rvt_model::Curve> = Vec::new();
-            for s0 in 0..b.len().saturating_sub(64) {
-                let mut run = Vec::new();
-                let mut s = s0;
-                while let Some((c, step)) = piece(s) {
-                    run.push(c);
-                    // the next piece is a line or an arc: stride of this piece, else of the other kind
-                    let next = [s + step, s + if step == 84 { 117 } else { 84 }];
-                    match next.into_iter().find(|n| piece(*n).is_some()) {
-                        Some(n) => s = n,
-                        None => break,
-                    }
-                }
-                if !run.is_empty() && run.len() >= best.len() {
-                    best = run;
-                }
-            }
+            let best = path_pieces(&b);
             if best.is_empty() {
                 continue;
             }
@@ -1067,4 +1050,70 @@ pub(crate) fn hdr_marker(ch: &Chain) -> Option<Vec<u8>> {
 /// A §6 line or arc block at `i` (no denormal coordinates), as a curve (for analysis tools).
 pub fn curve_block(b: &[u8], i: usize) -> Option<rvt_model::Curve> {
     curves::nodenorm(curves::block(b, i)).filter(|c| matches!(c, curves::Block::Line { .. } | curves::Block::Arc { .. })).map(|c| c.to_curve(0))
+}
+
+/// Steps 2284/2285: path pieces of a sweep-like element (slab edge, rail path): [t0][t1] followed
+/// by a line (origin, unit direction) or an arc (X, Y, radius, centre); pieces 84 (line) or 117
+/// (arc) bytes apart. The longest chain in the record, the last one on a tie.
+fn path_pieces(b: &[u8]) -> Vec<rvt_model::Curve> {
+    let f = |b: &[u8], o: usize| f64::from_le_bytes(b[o..o + 8].try_into().expect("8 bytes"));
+    let unit3 = |o: usize| -> Option<[f64; 3]> {
+        let v = [f(&b, o), f(&b, o + 8), f(&b, o + 16)];
+        let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        (n.is_finite() && (n - 1.0).abs() < 1e-6).then_some(v)
+    };
+    let pt3 = |o: usize| -> Option<[f64; 3]> {
+        let v = [f(&b, o), f(&b, o + 8), f(&b, o + 16)];
+        v.iter().all(|x| x.is_finite() && x.abs() < 1e6).then_some(v)
+    };
+    // arc at s: t0 t1, X, Y (unit, orthogonal), r, C
+    let arc = |s: usize| -> Option<rvt_model::Curve> {
+        if s + 96 > b.len() {
+            return None;
+        }
+        let (t0, t1) = (f(&b, s), f(&b, s + 8));
+        let (x, y) = (unit3(s + 16)?, unit3(s + 40)?);
+        let r = f(&b, s + 64);
+        let c = pt3(s + 72)?;
+        let ok = t0.is_finite() && t1.is_finite() && t1 > t0 && t1 - t0 < 7.0 && t0.abs() < 20.0 && r.is_finite() && r > 1e-3 && r < 1e5 && (x[0] * y[0] + x[1] * y[1] + x[2] * y[2]).abs() < 1e-6;
+        let at = |t: f64| [c[0] + r * (t.cos() * x[0] + t.sin() * y[0]), c[1] + r * (t.cos() * x[1] + t.sin() * y[1]), c[2] + r * (t.cos() * x[2] + t.sin() * y[2])];
+        ok.then(|| rvt_model::Curve { kind: "arc", p0: Some(at(t0)), p1: Some(at(t1)), t0: Some(t0), t1: Some(t1), center: Some(c), x: Some(x), y: Some(y), r: Some(r), ..Default::default() })
+    };
+    // line at s: t0 t1, origin, unit direction
+    let line = |s: usize| -> Option<rvt_model::Curve> {
+        if s + 64 > b.len() {
+            return None;
+        }
+        let (t0, t1) = (f(&b, s), f(&b, s + 8));
+        let (o, d) = (pt3(s + 16)?, unit3(s + 40)?);
+        let ok = t0.is_finite() && t1.is_finite() && t1 - t0 > 1e-4 && t1 - t0 < 1e4;
+        let at = |t: f64| [o[0] + t * d[0], o[1] + t * d[1], o[2] + t * d[2]];
+        ok.then(|| rvt_model::Curve { kind: "line", p0: Some(at(t0)), p1: Some(at(t1)), t0: Some(t0), t1: Some(t1), ..Default::default() })
+    };
+    // pieces are 84 (line) or 117 (arc) bytes apart; the longest chain of pieces, the last
+    // one on a tie (an arc is tried first: its X and Y also read as a line)
+    let piece = |s: usize| -> Option<(rvt_model::Curve, usize)> { arc(s).map(|c| (c, 117)).or_else(|| line(s).map(|c| (c, 84))) };
+    let mut best: Vec<rvt_model::Curve> = Vec::new();
+    for s0 in 0..b.len().saturating_sub(64) {
+        let mut run = Vec::new();
+        let mut s = s0;
+        while let Some((c, step)) = piece(s) {
+            run.push(c);
+            // the next piece is a line or an arc: stride of this piece, else of the other kind
+            let next = [s + step, s + if step == 84 { 117 } else { 84 }];
+            match next.into_iter().find(|n| piece(*n).is_some()) {
+                Some(n) => s = n,
+                None => break,
+            }
+        }
+        if !run.is_empty() && run.len() >= best.len() {
+            best = run;
+        }
+    }
+    best
+}
+
+/// `path_pieces` for analysis tools (step 2285).
+pub fn path_pieces_pub(b: &[u8]) -> Vec<rvt_model::Curve> {
+    path_pieces(b)
 }
