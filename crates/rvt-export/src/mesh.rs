@@ -1207,6 +1207,7 @@ pub fn scene(doc: &Document) -> Scene {
         };
         let curtains: Vec<&rvt_model::Wall> = walls_all.iter().filter(|w| w.curve.is_none() && doc.type_thickness(w.wall_type).is_none()).collect();
         if !curtains.is_empty() {
+            let mut cuts: Vec<(u64, u64, f64, f64)> = Vec::new();
             for h in walls_all.iter().filter(|w| w.curve.is_none()) {
                 let Some(t) = doc.type_thickness(h.wall_type).filter(|t| *t > 0.0) else { continue };
                 let a = [h.p0[0], h.p0[1], 0.0];
@@ -1227,6 +1228,35 @@ pub fn scene(doc: &Document) -> Scene {
                         continue;
                     }
                     m.entry(h.id).or_default().push((u0, u1, cz0, cz1));
+                    cuts.push((h.id, c.id, cz0, cz1));
+                }
+            }
+            // a straight wall lying face to face with a host (parallel, bands touching within
+            // 0.05 ft) is cut by the same opening (snowdon 1474830, 0.45 ft against host 619404's
+            // face, curtain wall 946544 on 619404's line: GT 1265 ft² = both faces less the opening)
+            let by_id: std::collections::HashMap<u64, &rvt_model::Wall> = walls_all.iter().map(|w| (w.id, w)).collect();
+            for (hid, cid, cz0, cz1) in cuts {
+                let (Some(h), Some(c)) = (by_id.get(&hid), curtains.iter().find(|c| c.id == cid)) else { continue };
+                let (Some(ht), Some(d)) = (doc.type_thickness(h.wall_type), unit(sub([h.p1[0], h.p1[1], 0.0], [h.p0[0], h.p0[1], 0.0]))) else { continue };
+                for w in walls_all.iter().filter(|w| w.id != hid && w.curve.is_none()) {
+                    let Some(wt) = doc.type_thickness(w.wall_type).filter(|t| *t > 0.0) else { continue };
+                    let a = [w.p0[0], w.p0[1], 0.0];
+                    let Some(wd) = unit(sub([w.p1[0], w.p1[1], 0.0], a)) else { continue };
+                    if dot(wd, d).abs() < 1.0 - 1e-6 {
+                        continue;
+                    }
+                    let rel = |p: P3| sub([p[0], p[1], 0.0], a);
+                    let off = (rel(h.p0)[0] * wd[1] - rel(h.p0)[1] * wd[0]).abs();
+                    if (off - (ht + wt) / 2.0).abs() > 0.05 {
+                        continue;
+                    }
+                    let len = norm(sub([w.p1[0], w.p1[1], 0.0], a));
+                    let (u0, u1) = (dot(rel(c.p0), wd).min(dot(rel(c.p1), wd)).max(0.0), dot(rel(c.p0), wd).max(dot(rel(c.p1), wd)).min(len));
+                    let (wz0, wz1) = zrange(w);
+                    let (z0, z1) = (cz0.max(wz0), cz1.min(wz1));
+                    if u1 - u0 > 0.1 && z1 - z0 > 0.1 {
+                        m.entry(w.id).or_default().push((u0, u1, z0, z1));
+                    }
                 }
             }
         }
