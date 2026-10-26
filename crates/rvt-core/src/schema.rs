@@ -61,6 +61,9 @@ pub struct Class {
 pub struct Schema {
     pub classes: Vec<Class>,
     by_name: HashMap<String, u16>,
+    /// per class (index tag − 12): its fields along the class chain as (class tag, field index),
+    /// built on first use (record decoding asks for them per object)
+    flat: std::sync::OnceLock<Vec<Vec<(u16, u16)>>>,
 }
 
 impl Schema {
@@ -83,7 +86,7 @@ impl Schema {
         let mut classes: Vec<Class> = p.classes.into_iter().map(|c| c.expect("every reserved slot is filled")).collect();
         classes.sort_by_key(|c| c.tag);
         let by_name = classes.iter().map(|c| (c.name.clone(), c.tag)).collect();
-        Ok(Schema { classes, by_name })
+        Ok(Schema { classes, by_name, flat: Default::default() })
     }
 
     /// The class with this tag.
@@ -111,6 +114,23 @@ impl Schema {
             }
         }
         false
+    }
+
+    /// The fields of a class and its ancestors, base class first, as (class tag, field index);
+    /// cached.
+    pub fn flat_fields(&self, tag: u16) -> &[(u16, u16)] {
+        let flat = self.flat.get_or_init(|| {
+            self.classes
+                .iter()
+                .map(|c| {
+                    self.all_fields(c.tag)
+                        .into_iter()
+                        .map(|(k, f)| (k.tag, k.fields.iter().position(|g| std::ptr::eq(g, f)).unwrap_or(0) as u16))
+                        .collect()
+                })
+                .collect()
+        });
+        tag.checked_sub(12).and_then(|i| flat.get(i as usize)).map_or(&[], |v| v.as_slice())
     }
 
     /// The fields of a class and its ancestors, base class first.

@@ -8,6 +8,7 @@ fn show(s: &rvt_core::Schema, v: &Value, depth: usize) -> String {
         Value::Str(t) => format!("{t:?}"),
         Value::Guid(_) => "guid".into(),
         Value::Ptr(p) => format!("->{}", p.map_or("null".into(), |i| i.to_string())),
+        Value::Ext(t) => format!("ext{t}"),
         Value::List(l) => {
             let items: Vec<String> = l.iter().take(6).map(|x| show(s, x, depth)).collect();
             format!("[{}{}]", items.join(", "), if l.len() > 6 { format!(", …{}", l.len()) } else { String::new() })

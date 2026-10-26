@@ -1078,6 +1078,86 @@ fn instance_batch(cat: i32) -> (&'static str, [f32; 3]) {
     }
 }
 
+/// Batches from Revit's saved graphics (open-research step 2304), with per batch the number of
+/// elements that would be drawn in it but have no saved-graphics record. `skip`: elements not drawn
+/// themselves (group definition copies, demolished, secondary options, curtain walls, in-place
+/// family members).
+fn saved_batches(doc: &Document, skip: &std::collections::HashSet<u64>) -> BTreeMap<&'static str, (Batch, usize)> {
+    let Some(sg) = doc.saved_graphics() else { return BTreeMap::new() };
+    let mut mesher = crate::saved::SavedMesher::new(sg);
+    let mut saved: BTreeMap<&'static str, (Batch, usize)> = BTreeMap::new();
+    let mut seen = std::collections::HashSet::new();
+    for e in doc.elements() {
+        // chain 0: the project (other chains are family documents)
+        if e.chain != 0 || e.category == -1 || e.view.is_some_and(|v| v != -1) || !seen.insert(e.id) || skip.contains(&e.id) {
+            continue;
+        }
+        let Some((name, color, counted)) = saved_batch(e.category) else { continue };
+        // the catch-all batch takes family instances only (snowdon arch 2025: energy analysis
+        // surfaces and spaces, 420 000 ft², and parts, shown only with 'Show Parts')
+        // types, rooms, analytical elements and groups are not drawn themselves
+        let class = e.class_tag.and_then(|t| sg.schema.class(t)).map_or("", |c| c.name.as_str());
+        let is_type = ["Sym", "Symbol", "Type", "Attributes", "Attr"].iter().any(|k| class.ends_with(k));
+        if is_type || (name == "Other family instances" && class != "FamilyInstance") || class.starts_with("Analytical") || matches!(class, "RoomElem" | "ElementGroup") {
+            continue;
+        }
+        let entry = saved.entry(name).or_insert_with(|| (Batch::new(name, color), 0));
+        match mesher.element(e.id) {
+            Some(tris) => {
+                if std::env::var_os("RVT_MESH_SAVED_IDS").is_some() {
+                    let a: f64 = tris.iter().map(|t| norm(cross(sub(t[1], t[0]), sub(t[2], t[0]))) / 2.0).sum();
+                    eprintln!("saved element {} {name} {:.2} ft2 cat {} class {class}", e.id, a, e.category);
+                }
+                for t in tris {
+                    entry.0.tri(t[0], t[1], t[2]);
+                }
+            }
+            // no saved triangles: not drawn by Revit either (racbasic 2026 fixture 937138:
+            // flat box, not in the {3D} view), unless there is no saved-graphics record at
+            // all (rebar has none, yet is drawn)
+            None if counted && !sg.bodies.contains_key(&e.id) => {
+                entry.1 += 1;
+                if std::env::var_os("RVT_MESH_STATS").is_some() && entry.1 <= 4 {
+                    eprintln!("  no saved graphics: {name} {} cat {} class {class} {}#{}", e.id, e.category, e.partition, e.chain);
+                }
+            }
+            None => {}
+        }
+    }
+    saved
+}
+
+/// The batch an element of a category goes to when drawn from saved graphics, and whether an
+/// element of it without saved graphics keeps the batch as built from the readers (false: a
+/// category of lines and markers that may have none).
+fn saved_batch(cat: i32) -> Option<(&'static str, [f32; 3], bool)> {
+    Some(match cat {
+        -2000011 => ("Walls", [0.90, 0.88, 0.84], true),
+        -2000181 => ("Wall sweeps", [0.80, 0.78, 0.74], true),
+        -2000032 => ("Floors", [0.62, 0.60, 0.56], true),
+        -2000038 => ("Ceilings", [0.93, 0.92, 0.90], true),
+        -2000035 => ("Roofs", [0.60, 0.30, 0.18], true),
+        -2001392 => ("Slab edges", [0.62, 0.60, 0.56], true),
+        -2000120 => ("Stairs", [0.70, 0.66, 0.60], true),
+        -2000126 | -2000946 | -2000947 | -2000948 => ("Railings", [0.45, 0.47, 0.50], true),
+        -2001340 => ("Topography", [0.56, 0.64, 0.44], true),
+        -2001263 => ("Pads", [0.66, 0.60, 0.52], true),
+        -2001370 => ("Entourage", [0.42, 0.45, 0.55], true),
+        -2000180 => ("Ramps", [0.70, 0.66, 0.60], true),
+        -2008000 | -2008020 => ("Ducts", [0.35, 0.60, 0.80], true),
+        -2008044 | -2008050 => ("Pipes", [0.30, 0.70, 0.45], true),
+        -2008130 | -2008132 => ("Cable trays and conduits", [0.85, 0.55, 0.20], true),
+        -2008049 => ("Pipe fittings", [0.30, 0.70, 0.45], true),
+        // balusters are drawn with their railing, stair runs/landings/supports with their stair;
+        // masses are hidden, boundary conditions analytical ('Show Mass' off)
+        -2000127 | -2000123 | -2000919 | -2000920 | -2003499..=-2003400 | -2005301 => return None,
+        _ => {
+            let (name, color) = instance_batch(cat);
+            (name, color, name != "Other family instances")
+        }
+    })
+}
+
 fn segment_batch(cat: Option<i32>) -> (&'static str, [f32; 3]) {
     match cat {
         Some(-2008000) => ("Ducts", [0.35, 0.60, 0.80]),
@@ -1089,6 +1169,10 @@ fn segment_batch(cat: Option<i32>) -> (&'static str, [f32; 3]) {
 
 /// Builds the viewer scene of a document.
 pub fn scene(doc: &Document) -> Scene {
+    std::thread::scope(|sc| scene_in(doc, sc))
+}
+
+fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Scene {
     // Step 2259: hidden group definition copies (S2233) are not drawn, whatever their kind. Their
     // group is none of the type's placed groups (Revit API: snowdon arch 2025 282/282 members of
     // groups outside GroupType.Groups and outside the Group collector; rac_basic fixture 800336, rme
@@ -1109,6 +1193,16 @@ pub fn scene(doc: &Document) -> Scene {
         let inplace = doc.inplace_ids();
         doc.walls().into_iter().filter(|w| seen.insert(w.id) && !inplace.contains(&w.id) && !group_defs.contains(&w.id)).collect::<Vec<_>>()
     };
+    // step 2304: the saved-graphics batches, on their own thread (merged at the end)
+    let saved_job = std::env::var_os("RVT_NO_SAVED").is_none().then(|| {
+        let mut skip = group_defs.clone();
+        // walls without a compound type are drawn by their panels (step 2215)
+        skip.extend(walls_all.iter().filter(|w| doc.type_thickness(w.wall_type).map_or(true, |t| t <= 0.0)).map(|w| w.id));
+        // members of in-place families are drawn by the family instance (racbasic 2026: walls
+        // 628450–628456, 4000 ft² not in Revit's view)
+        skip.extend(doc.inplace_ids());
+        sc.spawn(move || saved_batches(doc, &skip))
+    });
     // step 2228: an element can appear in two project chains (Storax: 366 copies in a second chain,
     // mostly without a type); keep one record per id, the one with a type
     let insts_all: Vec<Instance> = {
@@ -3388,6 +3482,21 @@ pub fn scene(doc: &Document) -> Scene {
                     }
                     b.indices.extend_from_slice(&[base, base + 1, base + 2]);
                 }
+            }
+        }
+    }
+
+    // open-research step 2304: Revit's own saved graphics (Revit 2024+ files), meshed alongside
+    // the readers above. A batch is replaced by them when every element drawn in it has them
+    // (racbasic 2026: all 28 categories within 1% of Revit's area, every element box exact);
+    // otherwise the batch stays as built above.
+    if let Some(job) = saved_job {
+        for (name, (b, missing)) in job.join().unwrap_or_default() {
+            if std::env::var_os("RVT_MESH_STATS").is_some() {
+                eprintln!("saved {name}: {} triangles, {missing} elements without", b.indices.len() / 3);
+            }
+            if missing == 0 && !b.indices.is_empty() {
+                batches.insert(name, b);
             }
         }
     }

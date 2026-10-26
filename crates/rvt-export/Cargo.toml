@@ -10,6 +10,7 @@ publish.workspace = true
 rvt-model.workspace = true
 rvt-read.workspace = true
 earcutr = "0.5"
+rvt-core.workspace = true
 acadrust = { version = "0.6.6", optional = true, default-features = false }
 delaunator = "1"
 

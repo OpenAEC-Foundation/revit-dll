@@ -72,6 +72,19 @@ pub struct Document {
     systems: Vec<MepSystem>,
     /// RailingType id -> height and top rail, over all chains (step 436, reference `grt`).
     rail_types: HashMap<i64, RailingTypeInfo>,
+    /// Open-research step 2303: the file, for reading the saved graphics on demand.
+    path: Option<std::path::PathBuf>,
+    saved: std::sync::OnceLock<Option<SavedGraphics>>,
+}
+
+/// Revit's own saved graphics (open-research, steps 2300–2303): the file's schema and the
+/// channel-103 record bodies by element id (Revit 2024+).
+pub struct SavedGraphics {
+    pub schema: rvt_core::Schema,
+    pub bodies: HashMap<u64, Vec<u8>>,
+    /// Graphics style (`GStyleElem`, channel 102) → its category id; `GInfo::m_categoryId` of a
+    /// saved-graphics node names a style (step 2304: light sources are style 102861 → −2001121).
+    pub styles: HashMap<u64, i64>,
 }
 
 impl Document {
@@ -92,8 +105,38 @@ impl Document {
     }
 
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
-        let cfb = Cfb::open(path)?;
-        Ok(Self::from_partitions(read_partitions(&cfb)?))
+        let cfb = Cfb::open(path.as_ref())?;
+        let mut doc = Self::from_partitions(read_partitions(&cfb)?);
+        doc.path = Some(path.as_ref().to_path_buf());
+        Ok(doc)
+    }
+
+    /// The saved graphics of the file (read once, on first use); none for files before Revit
+    /// 2024 or when the schema or partitions cannot be read that way.
+    pub fn saved_graphics(&self) -> Option<&SavedGraphics> {
+        self.saved
+            .get_or_init(|| {
+                let cfb = Cfb::open(self.path.as_ref()?).ok()?;
+                let schema = rvt_core::Schema::read(&cfb).ok()?;
+                let recs = rvt_core::records::file_channel(&cfb, &schema, 103).ok()?;
+                let mut styles = HashMap::new();
+                if let (Some(tag), Ok(objs)) = (schema.tag("GStyleElem"), rvt_core::records::file_channel(&cfb, &schema, 102)) {
+                    for (id, r) in objs {
+                        if r.body.get(..2) != Some(&tag.to_le_bytes()[..]) {
+                            continue;
+                        }
+                        let cat = rvt_core::graph::Graph::decode(&schema, &r.body).ok().and_then(|g| {
+                            let v = g.objects.first()?.get("m_categoryId")?.as_obj()?.get("m_id")?.as_obj()?.get("m_id64")?.as_i64();
+                            v
+                        });
+                        if let Some(c) = cat {
+                            styles.insert(id, c);
+                        }
+                    }
+                }
+                Some(SavedGraphics { schema, bodies: recs.into_iter().map(|(k, r)| (k, r.body)).collect(), styles })
+            })
+            .as_ref()
     }
 
     pub fn from_partitions(partitions: Vec<Partition>) -> Self {
@@ -161,6 +204,8 @@ impl Document {
             type_width: HashMap::new(),
             systems: Vec::new(),
             rail_types: HashMap::new(),
+            path: None,
+            saved: std::sync::OnceLock::new(),
         };
         doc.rail_types = railings::rail_types(doc.partitions.iter().flat_map(|p| p.chains.iter()));
         let mut systems: Vec<MepSystem> = Vec::new();

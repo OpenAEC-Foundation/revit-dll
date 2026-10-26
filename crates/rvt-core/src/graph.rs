@@ -5,7 +5,7 @@
 //! class tag. An object's fields are decoded along its class chain, base class first, in schema
 //! order; fields whose flags have bit 2 set are transient and absent. Field types by descriptor
 //! base: 1 bool (1 B), 2 u8, 3 i16, 4 i32, 5 u32, 6 f32, 7 f64, 8 string (u32 count + UTF-16), 9
-//! GUID (16 B), 11 i64, 13 nested (the inner descriptor per element), 14 object: modifier low
+//! GUID (16 B), 10 a `u16` class tag, 11 i64, 13 nested (the inner descriptor per element), 14 object: modifier low
 //! nibble 0 inline (the field's class), 1..=3 a pointer: `u32` token, then (non-zero token, not
 //! external = 3) the target's `u16` class tag; targets are decoded after the current object, in
 //! order of appearance, once per token (0xffffffff never shared). Modifier 0x10..=0x13: fixed array of the field's count,
@@ -26,8 +26,13 @@ pub enum Value {
     Guid([u8; 16]),
     /// An inline object.
     Obj(Box<Object>),
-    /// A pointer: the index of the target in `Graph::objects`, none when null or external.
+    /// A pointer: the index of the target in `Graph::objects`, none when null or unresolved.
+    /// External pointers (modifier 3) carry only a token; it is resolved after decoding to the
+    /// object that a non-external pointer with that token introduced (step 2303: Edge::m_pFace,
+    /// Edge::m_next, EdgeLoop::m_next).
     Ptr(Option<usize>),
+    /// An external pointer before resolution (token).
+    Ext(u32),
     List(Vec<Value>),
 }
 
@@ -56,6 +61,15 @@ impl Value {
         match self {
             Value::Ptr(p) => *p,
             _ => None,
+        }
+    }
+
+    fn resolve(&mut self, tokens: &HashMap<u32, usize>) {
+        match self {
+            Value::Ext(t) => *self = Value::Ptr(tokens.get(t).copied()),
+            Value::List(l) => l.iter_mut().for_each(|v| v.resolve(tokens)),
+            Value::Obj(o) => o.fields.iter_mut().for_each(|(_, v)| v.resolve(tokens)),
+            _ => {}
         }
     }
     pub fn as_list(&self) -> Option<&[Value]> {
@@ -104,12 +118,23 @@ impl Graph {
         if d.p != body.len() {
             return Err(Error::Format(format!("graph: {} of {} bytes consumed", d.p, body.len())));
         }
+        // external pointers: the object whose token they name (the root has no token)
+        let tokens = d.tokens.clone();
+        for o in objects.iter_mut() {
+            o.fields.iter_mut().for_each(|(_, v)| v.resolve(&tokens));
+        }
         Ok(Graph { objects })
     }
 
     pub fn class_name<'a>(&self, schema: &'a Schema, i: usize) -> Option<&'a str> {
         self.objects.get(i).and_then(|o| schema.class(o.class)).map(|c| c.name.as_str())
     }
+}
+
+/// RVT_GRAPH_TRACE=1: objects, pointers and GInfo flags on stderr (read once: decoding is hot).
+fn trace() -> bool {
+    static T: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *T.get_or_init(|| std::env::var_os("RVT_GRAPH_TRACE").is_some())
 }
 
 struct Decoder<'a> {
@@ -120,8 +145,8 @@ struct Decoder<'a> {
     queue: Vec<(u16, u32)>,
     /// token → index in `Graph::objects` (root = 0, queue[i] = i + 1)
     tokens: HashMap<u32, usize>,
-    /// class::field path of the value being read (error messages)
-    trail: Vec<String>,
+    /// (class tag, field index, offset) of the values being read (error messages)
+    trail: Vec<(u16, u16, usize)>,
 }
 
 impl Decoder<'_> {
@@ -142,22 +167,30 @@ impl Decoder<'_> {
         if s.class(tag).is_none() {
             return Err(Error::Format(format!("graph: unknown class tag {tag} at {}", self.p)));
         }
-        if std::env::var("RVT_GRAPH_TRACE").is_ok() {
+        if trace() {
             eprintln!("obj {} at {}", s.class(tag).map_or("?", |c| c.name.as_str()), self.p);
         }
         let mut fields: Vec<(String, Value)> = Vec::new();
-        for (_, f) in s.all_fields(tag) {
+        for &(ct, fi) in s.flat_fields(tag) {
+            let Some(f) = s.class(ct).and_then(|c| c.fields.get(fi as usize)) else { continue };
             let flags = f.flags();
             if flags & 2 != 0 {
                 continue; // transient
             }
-            self.trail.push(format!("{}::{}@{}", s.class(tag).map_or("?", |c| c.name.as_str()), f.name, self.p));
+            self.trail.push((tag, fi, self.p));
             let v = self.field(f).map_err(|e| match e {
-                Error::Format(m) if !m.contains(" in ") => Error::Format(format!("{m} in {}", self.trail.join(" > "))),
+                Error::Format(m) if !m.contains(" in ") => {
+                    let path: Vec<String> = self
+                        .trail
+                        .iter()
+                        .map(|&(t, _, at)| format!("{}@{at}", s.class(t).map_or("?", |c| c.name.as_str())))
+                        .collect();
+                    Error::Format(format!("{m} in {} ({}::{})", path.join(" > "), s.class(ct).map_or("?", |c| c.name.as_str()), f.name))
+                }
                 e => e,
             })?;
             self.trail.pop();
-            if std::env::var("RVT_GRAPH_TRACE").is_ok() && f.name == "m_flags" && s.class(tag).is_some_and(|c| c.name == "GInfo") {
+            if trace() && f.name == "m_flags" && s.class(tag).is_some_and(|c| c.name == "GInfo") {
                 eprintln!("   GInfo.m_flags {:?} ends {}", v.as_i64().map(|x| format!("{x:#x}")), self.p);
             }
             if !fields.iter().any(|(n, _)| *n == f.name) {
@@ -199,6 +232,8 @@ impl Decoder<'_> {
                 Value::Str(String::from_utf16_lossy(&units))
             }
             9 => Value::Guid(self.take(16)?.try_into().unwrap()),
+            // a schema class tag (ClassDefinitionRef::m_ref)
+            10 => Value::Int(self.u16()? as i64),
             11 => Value::Int(i64::from_le_bytes(self.take(8)?.try_into().unwrap())),
             13 => {
                 let inner = f.inner.as_ref().ok_or_else(|| Error::Format("graph: nested field without inner descriptor".into()))?;
@@ -210,11 +245,13 @@ impl Decoder<'_> {
             }
             14 => {
                 let token = self.u32()?;
-                if token == 0 || m & 0x0f == 3 {
+                if token == 0 {
                     Value::Ptr(None)
+                } else if m & 0x0f == 3 {
+                    Value::Ext(token)
                 } else {
                     let tag = self.u16()?;
-                    if std::env::var("RVT_GRAPH_TRACE").is_ok() {
+                    if trace() {
                         eprintln!("   ptr token {token} -> {} {}", self.s.class(tag).map_or("?", |c| c.name.as_str()), if self.tokens.contains_key(&token) { "(seen)" } else { "" });
                     }
                     // token 0xffffffff is never shared: every such pointer has its own target
