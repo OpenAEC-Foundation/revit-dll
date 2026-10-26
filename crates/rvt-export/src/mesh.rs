@@ -2506,7 +2506,15 @@ pub fn scene(doc: &Document) -> Scene {
         let pick = |bi: i64, want: &[&str]| {
             set.rows.iter().find(|r| r.param == bi).or_else(|| set.rows.iter().find(|r| named(r.param, want))).map(|r| r.num).filter(|v| *v > 1e-6)
         };
-        [pick(-1001301, &["Width", "Length", "Door Width"]), pick(-1010003, &["Depth"]), pick(-1001300, &["Height", "Door Height"])]
+        // step 2294: structural foundations size by STRUCTURAL_FOUNDATION_WIDTH −1001568 / LENGTH
+        // −1001569 / THICKNESS −1001557 (API names; snowdon structural 2026 pile type 682330:
+        // thickness 25 ft, our forms a stub)
+        let or = |a: Option<f64>, bi: i64| a.or_else(|| set.rows.iter().find(|r| r.param == bi).map(|r| r.num).filter(|v| *v > 1e-6));
+        [
+            or(pick(-1001301, &["Width", "Length", "Door Width"]), -1001568),
+            or(pick(-1010003, &["Depth"]), -1001569),
+            or(pick(-1001300, &["Height", "Door Height"]), -1001557),
+        ]
     };
     let type_scale = |sym: u64, own: &[[P3; 3]]| -> Option<[f64; 3]> {
         let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
@@ -3002,8 +3010,19 @@ pub fn scene(doc: &Document) -> Scene {
                     eprintln!("debug {}: type scale {:?}, covers {covers}", i.id, typed.borrow().get(&sym));
                 }
                 if let Some(sc) = typed.borrow().get(&sym).copied().filter(|_| !covers) {
-                    let ws: Vec<[P3; 3]> = scale3(local, sc).iter().map(|t| [place(o, &m, t[0]), place(o, &m, t[1]), place(o, &m, t[2])]).collect();
-                    let (sl, sh) = bounds(&ws);
+                    let mut ws: Vec<[P3; 3]> = scale3(local, sc).iter().map(|t| [place(o, &m, t[0]), place(o, &m, t[1]), place(o, &m, t[2])]).collect();
+                    let (mut sl, mut sh) = bounds(&ws);
+                    // step 2294: the scaled shape has the stored box's size but sits beside it (an
+                    // offset parameter that is no size: snowdon structural pile type 682330 'Top
+                    // Offset negative' 1.5 ft): moved onto the box, by at most 3 ft
+                    let shift: P3 = std::array::from_fn(|k| bb[k] - sl[k]);
+                    if !ws.is_empty()
+                        && !(0..3).all(|k| sl[k] >= bb[k] - 0.15 && sh[k] <= bb[k + 3] + 0.15)
+                        && (0..3).all(|k| ((sh[k] - sl[k]) - (bb[k + 3] - bb[k])).abs() <= 0.15 && shift[k].abs() <= 3.0)
+                    {
+                        ws = ws.iter().map(|t| t.map(|q| add(q, shift))).collect();
+                        (sl, sh) = bounds(&ws);
+                    }
                     if !ws.is_empty() && (0..3).all(|k| sl[k] >= bb[k] - 0.15 && sh[k] <= bb[k + 3] + 0.15) {
                         let b = batch!(name, color);
                         let rev = det3(&m) < 0.0;
