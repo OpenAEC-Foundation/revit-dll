@@ -366,6 +366,52 @@ impl Document {
         out
     }
 
+    /// Step 2290: roofs by face on a mass: a roof element (cat −2000035, with a box) that references
+    /// (i32 or i64) a mass instance (cat −2003400), with the model lines (cat −2000045) of that
+    /// mass's in-place family (Technical school 2015: roof 140056, class 1396, mass 139739, family
+    /// 139678 with 8 lines tracing the building's L, the roof box 1.3 ft thick on top).
+    pub fn mass_roofs(&self) -> Vec<(u64, Vec<rvt_model::Curve>)> {
+        let mut out = Vec::new();
+        let roofs: Vec<ElementInfo> = self.elements_in_category(-2000035).filter(|e| e.bbox.is_some()).collect();
+        if roofs.is_empty() {
+            return out;
+        }
+        let masses: HashMap<u64, Option<u64>> = self.instances().into_iter().filter(|i| i.cat == -2003400).map(|i| (i.id, i.symbol)).collect();
+        if masses.is_empty() {
+            return out;
+        }
+        let sf = self.symbol_family();
+        let members: Vec<(String, usize, rvt_model::InplaceMember)> =
+            self.inplace_members_by_chain().into_iter().flat_map(|(st, ix, v)| v.into_iter().map(move |m| (st.clone(), ix, m))).collect();
+        let mut curves_of: HashMap<(String, usize), HashMap<u64, rvt_model::Curve>> = HashMap::new();
+        for r in roofs {
+            let Some(b) = self.element_body(r.id) else { continue };
+            let mass = (0..b.len().min(2000).saturating_sub(3))
+                .flat_map(|o| {
+                    let a = i32::from_le_bytes(b[o..o + 4].try_into().expect("4 bytes")) as i64;
+                    let c = if o + 8 <= b.len() { util::i64_at(&b, o) } else { 0 };
+                    [a, c]
+                })
+                .find(|q| *q > 0 && masses.contains_key(&(*q as u64)));
+            let Some(mass) = mass else { continue };
+            let Some(fam) = masses[&(mass as u64)].and_then(|s| sf.get(&s)).copied() else { continue };
+            let mut cs = Vec::new();
+            for (st, ix, m) in members.iter().filter(|(_, _, m)| m.family == fam as i64) {
+                if !self.element(m.id).is_some_and(|e| e.category == -2000045) {
+                    continue;
+                }
+                let map = curves_of.entry((st.clone(), *ix)).or_insert_with(|| self.chain_curves(st, *ix).into_iter().collect());
+                if let Some(c) = map.get(&m.id) {
+                    cs.push(c.clone());
+                }
+            }
+            if !cs.is_empty() {
+                out.push((r.id, cs));
+            }
+        }
+        out
+    }
+
     /// Step 2285: top rails and handrails. The record references its type (same category, no
     /// box), its railing (cat −2000126) and, last, the path element whose body holds the path pieces.
     pub fn rails(&self) -> Vec<rvt_model::Rail> {

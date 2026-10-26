@@ -1421,6 +1421,16 @@ pub fn scene(doc: &Document) -> Scene {
     for r in doc.roofs().into_iter().filter(|r| !group_defs.contains(&r.id)) {
         roof_into(batch!("Roofs", [0.60, 0.30, 0.18]), &r);
     }
+    // Step 2290: a roof by face on a mass (Technical school 2015 roof 140056 on mass 139739): the
+    // outline of the mass's model lines in plan, between the roof's stored bottom and top
+    for (rid, cs) in doc.mass_roofs().into_iter().filter(|(r, _)| !group_defs.contains(r)) {
+        let Some(bb) = doc.element(rid).and_then(|e| e.bbox) else { continue };
+        let t = bb[5] - bb[2];
+        if !(t > 0.01 && t < 5.0) {
+            continue; // only a flat roof on top of the mass
+        }
+        slab(batch!("Roofs", [0.60, 0.30, 0.18]), &cs, Some(bb[5]), t, true);
+    }
 
     let segs: Vec<Segment> = doc.segments().into_iter().filter(|s| !group_defs.contains(&s.id)).collect();
     for s in &segs {
