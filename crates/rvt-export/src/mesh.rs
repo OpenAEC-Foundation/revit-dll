@@ -1894,22 +1894,31 @@ pub fn scene(doc: &Document) -> Scene {
     // top; the footing runs along that line over the box, as wide as the box across an axis-aligned
     // wall (else the width of the axis-aligned footings), as thick as the box.
     {
-        let fnds: Vec<[f64; 6]> = doc
+        // step 2293: with the wall the footing's record references (i64 in its first 400 bytes;
+        // snowdon structural 2026 670988 @174 → wall 601097), else found by geometry as before
+        let wall_ids: std::collections::HashSet<u64> = walls_all.iter().map(|w| w.id).collect();
+        let fnds: Vec<([f64; 6], Option<u64>)> = doc
             .elements_in_category(-2001300)
-            .filter(|e| e.class_tag.is_some() && e.class_tag == doc.class_tag(918))
-            .filter_map(|e| e.bbox)
+            .filter(|e| e.class_tag.is_some() && e.class_tag == doc.class_tag(918) && !group_defs.contains(&e.id))
+            .filter_map(|e| {
+                let host = doc.element_body(e.id).and_then(|b| {
+                    (0..b.len().min(400).saturating_sub(7)).map(|o| i64_at_le(&b, o)).find(|q| *q > 0 && wall_ids.contains(&(*q as u64))).map(|q| q as u64)
+                });
+                e.bbox.map(|bb| (bb, host))
+            })
             .collect();
         let mut widths = Vec::new();
         let mut placed: Vec<(P3, P3, f64, f64, f64, Option<f64>)> = Vec::new(); // a, b, z0, z1, axis-aligned width
-        for bb in &fnds {
+        for (bb, host) in &fnds {
             let inside = |q: P3| q[0] >= bb[0] - 2.0 && q[0] <= bb[3] + 2.0 && q[1] >= bb[1] - 2.0 && q[1] <= bb[4] + 2.0;
-            let Some(w) = walls_all.iter().find(|w| {
+            let by_ref = host.and_then(|h| walls_all.iter().find(|w| w.id == h));
+            let Some(w) = by_ref.or_else(|| walls_all.iter().find(|w| {
                 let zb = doc.level_elevation(w.base_level).map(|z| z + w.base_offset).unwrap_or(w.p0[2]);
                 // the wall line spans the footing box in both directions (an oblique footing's box is
                 // its diagonal; a straight one's width is at most a few feet)
                 let spans = w.p0[0].min(w.p1[0]) <= bb[0] + 4.5 && w.p0[0].max(w.p1[0]) >= bb[3] - 4.5 && w.p0[1].min(w.p1[1]) <= bb[1] + 4.5 && w.p0[1].max(w.p1[1]) >= bb[4] - 4.5;
                 inside(w.p0) && inside(w.p1) && spans && (zb - bb[5]).abs() < 0.6
-            }) else {
+            })) else {
                 continue;
             };
             let a = [w.p0[0], w.p0[1], 0.0];
