@@ -2560,7 +2560,9 @@ pub fn scene(doc: &Document) -> Scene {
         let sc: [f64; 3] = std::array::from_fn(|k| match (target[k], default[k]) {
             // a size counts for the axis only when it spans most of the form there, ≥ 70% (a shower's
             // pipe 'Length' 0.12 ft and door 1.875 of 2.83 ft are no overall size; elevator door 3.0 of 4.08)
-            (Some(t), Some(d)) if ext[k] > 1e-6 && d >= 0.7 * ext[k] && t >= 0.7 * ext[k] => (ext[k] + t - d) / ext[k],
+            // step 2295: a default equal to the form (±5%) spans it, so any target size applies
+            // (snowdon structural pile type 682330: 3 → 2 ft across, below the 70%)
+            (Some(t), Some(d)) if ext[k] > 1e-6 && d >= 0.7 * ext[k] && (t >= 0.7 * ext[k] || (d - ext[k]).abs() <= 0.05 * ext[k]) => (ext[k] + t - d) / ext[k],
             _ => 1.0,
         });
         (sc.iter().any(|v| (v - 1.0).abs() > 0.01) && sc.iter().all(|v| (0.2..=5.0).contains(v))).then_some(sc)
