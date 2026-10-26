@@ -1185,8 +1185,39 @@ pub fn scene(doc: &Document) -> Scene {
         let wall_line: std::collections::HashMap<u64, (P3, P3)> = walls_all.iter().map(|w| (w.id, (w.p0, w.p1))).collect();
         let cat: std::collections::HashMap<u64, i32> = insts_all.iter().map(|i| (i.id, i.cat)).collect();
         let mut m: std::collections::HashMap<u64, Vec<(f64, f64, f64, f64)>> = std::collections::HashMap::new();
+        // step 2296: also wall-based families without solid forms (voids only: snowdon structural
+        // 2026 'GM_OpeningWall_*'; GT walls 1.06 → the 91 openings ≈ 410 m²)
+        let opening_syms: std::collections::HashSet<u64> = {
+            let wall_based: std::collections::HashSet<(String, usize)> =
+                doc.elements().filter(|e| e.category == -2000011).map(|e| (e.partition, e.chain)).collect();
+            let mut solid: std::collections::HashSet<(String, usize)> = std::collections::HashSet::new();
+            for (st, ix, v) in doc.family_solids_by_chain() {
+                if v.iter().any(|x| x.void != Some(true)) {
+                    solid.insert((st, ix));
+                }
+            }
+            for (st, ix, v) in doc.family_sweeps_by_chain() {
+                if v.iter().any(|x| x.void != Some(true)) {
+                    solid.insert((st, ix));
+                }
+            }
+            for (st, ix, b, r) in doc.family_blends_revolves_by_chain() {
+                if b.iter().any(|x| x.void != Some(true)) || r.iter().any(|x| x.void != Some(true)) {
+                    solid.insert((st, ix));
+                }
+            }
+            let (sf, fc) = (doc.symbol_family(), doc.family_chains());
+            insts_all
+                .iter()
+                .filter(|i| i.cat == -2000151)
+                .filter_map(|i| i.symbol)
+                .filter(|s| sf.get(s).and_then(|f| fc.get(f)).is_some_and(|k| wall_based.contains(k) && !solid.contains(k)))
+                .collect()
+        };
+        let sym_of: std::collections::HashMap<u64, Option<u64>> = insts_all.iter().map(|i| (i.id, i.symbol)).collect();
         for h in doc.hosted() {
-            if !matches!(cat.get(&h.id), Some(-2000023 | -2000014)) {
+            let opening = sym_of.get(&h.id).copied().flatten().is_some_and(|s| opening_syms.contains(&s));
+            if !matches!(cat.get(&h.id), Some(-2000023 | -2000014)) && !opening {
                 continue;
             }
             let Some(host) = h.host.map(|x| x as u64) else { continue };
@@ -2209,6 +2240,10 @@ pub fn scene(doc: &Document) -> Scene {
     let family_chain = doc.family_chains();
     let adaptive_chains: std::collections::HashSet<(String, usize)> =
         doc.elements().filter(|e| e.category == -2000710).map(|e| (e.partition, e.chain)).collect();
+    // step 2296: family chains holding a sample host wall (wall-based templates; a project chain is
+    // never a symbol's family chain, so project walls do not count)
+    let wall_based_chains: std::collections::HashSet<(String, usize)> =
+        doc.elements().filter(|e| e.category == -2000011).map(|e| (e.partition, e.chain)).collect();
     // Step 2258: a family document's group type keeps hidden definition copies of its members (header
     // slot = the GroupType, as in projects, step 2233); rac_basic 2026 solar panel: an arrayed cell's
     // copy 4 ft beside the panel. Those forms are not drawn.
@@ -3182,6 +3217,16 @@ pub fn scene(doc: &Document) -> Scene {
         // Step 2283: a family that holds adaptive content beside readable forms (snowdon canopy
         // 2220523: nested columns, plus rings and shared struts we cannot fit) misses the box fit
         // because its box also spans that content; its forms are placed as they are, unfitted.
+        // step 2296: a wall-based family without readable forms (snowdon structural 2026
+        // 'GM_OpeningWall_*', 91 generic models: voids cutting their wall, no geometry in Revit's
+        // view; we drew 633 m² of boxes) gets no box; doors and windows keep their wall-band box
+        let no_forms = i.symbol.and_then(|s| shape_cache.get(&s)).is_none_or(|c| c.is_empty());
+        if no_forms
+            && !matches!(i.cat, -2000023 | -2000014)
+            && i.symbol.and_then(|s| symbol_family.get(&s)).and_then(|f| family_chain.get(f)).is_some_and(|k| wall_based_chains.contains(k))
+        {
+            continue;
+        }
         if i.symbol.and_then(|s| symbol_family.get(&s)).and_then(|f| family_chain.get(f)).is_some_and(|k| adaptive_chains.contains(k)) {
             if let (Some(c), Some(o), Some(m)) = (i.symbol.and_then(|s| shape_cache.get(&s)).and_then(|c| c.first().cloned()), i.origin, i.rotation) {
                 let rev = det3(&m) < 0.0;
