@@ -1774,6 +1774,9 @@ pub fn scene(doc: &Document) -> Scene {
         let fam_chain = doc.family_chains();
         let wall_line: std::collections::HashMap<i64, (P3, P3)> = walls_all.iter().map(|w| (w.id as i64, (w.p0, w.p1))).collect();
         let mut prof_width: std::collections::HashMap<i64, Option<f64>> = std::collections::HashMap::new();
+        let mut prof_shape: std::collections::HashMap<u64, Option<Vec<[f64; 2]>>> = std::collections::HashMap::new();
+        let gnames = doc.parameter_names_global();
+        let rows: std::collections::HashMap<u64, rvt_model::ValueSet> = doc.type_values_by_chain().into_iter().flat_map(|(_, _, m)| m.into_iter()).collect();
         for sw in doc.wall_sweeps().into_iter().filter(|s| s.cat == -2000181 && !group_defs.contains(&s.id)) {
             let Some(bb) = doc.element(sw.id).and_then(|e| e.bbox) else { continue };
             let width = sw.sweep_type.filter(|t| *t > 0).and_then(|t| {
@@ -1801,6 +1804,15 @@ pub fn scene(doc: &Document) -> Scene {
                 continue;
             }
             let host = sw.hosts.first().and_then(|h| wall_line.get(h)).copied();
+            let src = sw.sweep_type.filter(|t| *t > 0).map(|t| t as u64).unwrap_or(sw.id);
+            let profile = prof_shape
+                .entry(src)
+                .or_insert_with(|| type_profile(doc, src, &fam_of, &fam_chain, &gnames, &rows))
+                .clone()
+                .filter(|p| {
+                    let (lo, hi) = p.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), q| (l.min(q[1]), h.max(q[1])));
+                    ((hi - lo) - (bb[5] - bb[2])).abs() <= 0.05
+                });
             for (a, b) in &segs {
                 let Some(d) = unit(sub([b[0], b[1], 0.0], [a[0], a[1], 0.0])) else { continue };
                 let mut n = [-d[1], d[0], 0.0];
@@ -1827,6 +1839,18 @@ pub fn scene(doc: &Document) -> Scene {
                         bb[k + 3] - bb[k]
                     })
                 });
+                // step 2298: the real profile (the type's profile family, or for a sweep without a
+                // type the profile symbol in its own record: snowdon facades 2026 638678 @160) when
+                // its height is the stored box's: profile x from its minimum on the path (the wall
+                // face) outward, its top at the box top (GT 638678: 0.208 × 1.458 ft, both exact)
+                if let Some(prof) = &profile {
+                    let (xlo, yhi) = prof.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), q| (l.min(q[0]), h.max(q[1])));
+                    // away from the wall line (GT 638678: path on the wall face, profile outside it)
+                    let out = mul(n, -1.0);
+                    let pts = vec![rvt_model::Curve { kind: "line", p0: Some(*a), p1: Some(*b), ..Default::default() }];
+                    sweep_profile(batch!("Wall sweeps", [0.80, 0.78, 0.74]), &pts, prof, |pt, _d, q| Some([pt[0] + out[0] * (q[0] - xlo), pt[1] + out[1] * (q[0] - xlo), bb[5] - (yhi - q[1])]));
+                    continue;
+                }
                 let Some(w) = w.filter(|w| *w > 1e-3) else { continue };
                 let (z0, z1) = (bb[2], bb[5]);
                 let at = |p: P3, s: f64, z: f64| [p[0] + n[0] * s, p[1] + n[1] * s, z];
