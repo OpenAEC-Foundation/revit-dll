@@ -2,4 +2,5 @@
 //! (DXF/DWG through acadrust).
 
 pub mod mesh;
+pub mod rebar;
 pub mod saved;

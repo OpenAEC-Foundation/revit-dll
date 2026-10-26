@@ -1102,7 +1102,7 @@ fn saved_batches(doc: &Document, skip: &std::collections::HashSet<u64>) -> BTree
             continue;
         }
         let entry = saved.entry(name).or_insert_with(|| (Batch::new(name, color), 0));
-        match mesher.element(e.id) {
+        match mesher.element(e.id).or_else(|| crate::rebar::element(sg, e.id)) {
             Some(tris) => {
                 if std::env::var_os("RVT_MESH_SAVED_IDS").is_some() {
                     let a: f64 = tris.iter().map(|t| norm(cross(sub(t[1], t[0]), sub(t[2], t[0]))) / 2.0).sum();
@@ -1148,6 +1148,8 @@ fn saved_batch(cat: i32) -> Option<(&'static str, [f32; 3], bool)> {
         -2008044 | -2008050 => ("Pipes", [0.30, 0.70, 0.45], true),
         -2008130 | -2008132 => ("Cable trays and conduits", [0.85, 0.55, 0.20], true),
         -2008049 => ("Pipe fittings", [0.30, 0.70, 0.45], true),
+        // step 2305: from the bar centerlines (no saved graphics)
+        -2009000 => ("Rebar", [0.70, 0.25, 0.20], false),
         // balusters are drawn with their railing, stair runs/landings/supports with their stair;
         // masses are hidden, boundary conditions analytical ('Show Mass' off)
         -2000127 | -2000123 | -2000919 | -2000920 | -2003499..=-2003400 | -2005301 => return None,

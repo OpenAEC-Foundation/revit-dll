@@ -85,7 +85,13 @@ pub struct SavedGraphics {
     /// Graphics style (`GStyleElem`, channel 102) → its category id; `GInfo::m_categoryId` of a
     /// saved-graphics node names a style (step 2304: light sources are style 102861 → −2001121).
     pub styles: HashMap<u64, i64>,
+    /// Channel-102 object records of the classes the saved graphics do not cover (rebar: no
+    /// channel-103 record, step 2305), by element id.
+    pub objects: HashMap<u64, Vec<u8>>,
 }
+
+/// Classes whose channel-102 records `SavedGraphics::objects` keeps.
+const OBJECT_CLASSES: &[&str] = &["Rebar", "RebarInSystem", "RebarSystem", "RebarBarType"];
 
 impl Document {
     /// Opens a file from memory (for example bytes received over IPC).
@@ -120,9 +126,16 @@ impl Document {
                 let schema = rvt_core::Schema::read(&cfb).ok()?;
                 let recs = rvt_core::records::file_channel(&cfb, &schema, 103).ok()?;
                 let mut styles = HashMap::new();
+                let mut objects = HashMap::new();
+                let keep: Vec<u16> = OBJECT_CLASSES.iter().filter_map(|c| schema.tag(c)).collect();
                 if let (Some(tag), Ok(objs)) = (schema.tag("GStyleElem"), rvt_core::records::file_channel(&cfb, &schema, 102)) {
                     for (id, r) in objs {
-                        if r.body.get(..2) != Some(&tag.to_le_bytes()[..]) {
+                        let root = r.body.get(..2).map(|b| u16::from_le_bytes([b[0], b[1]]));
+                        if root.is_some_and(|t| keep.contains(&t)) {
+                            objects.insert(id, r.body);
+                            continue;
+                        }
+                        if root != Some(tag) {
                             continue;
                         }
                         let cat = rvt_core::graph::Graph::decode(&schema, &r.body).ok().and_then(|g| {
@@ -134,7 +147,7 @@ impl Document {
                         }
                     }
                 }
-                Some(SavedGraphics { schema, bodies: recs.into_iter().map(|(k, r)| (k, r.body)).collect(), styles })
+                Some(SavedGraphics { schema, bodies: recs.into_iter().map(|(k, r)| (k, r.body)).collect(), styles, objects })
             })
             .as_ref()
     }

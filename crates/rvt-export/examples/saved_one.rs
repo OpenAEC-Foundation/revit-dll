@@ -16,7 +16,7 @@ fn main() {
     let quiet = std::env::var("RVT_SAVED_QUIET").is_ok();
     for id in &ids {
         let id: u64 = id.trim().parse().unwrap();
-        match m.element(id) {
+        match m.element(id).or_else(|| rvt_export::rebar::element(sg, id)) {
             Some(t) => {
                 let area: f64 = t.iter().map(|t| {
                     let (u, v) = ([t[1][0] - t[0][0], t[1][1] - t[0][1], t[1][2] - t[0][2]], [t[2][0] - t[0][0], t[2][1] - t[0][1], t[2][2] - t[0][2]]);
