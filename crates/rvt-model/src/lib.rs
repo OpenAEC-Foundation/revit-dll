@@ -6,6 +6,9 @@
 
 use serde::Serialize;
 
+pub mod object;
+pub use object::{ChannelCoverage, Coverage, FailingClass, FieldValue, FieldView, NestedObject, ObjectView};
+
 /// Generic view of one element: what the element table says about it.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ElementInfo {

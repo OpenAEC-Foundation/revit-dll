@@ -10,3 +10,6 @@ publish.workspace = true
 rvt-core.workspace = true
 flate2.workspace = true
 rvt-model.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

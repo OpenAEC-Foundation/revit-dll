@@ -31,7 +31,17 @@ const USAGE: &str = "usage:
   rvt wall_types <file.rvt>            type catalogue with layers (wall/floor/roof/ceiling types)
   rvt elements <file.rvt>              element tables per partition and chain
   rvt mesh <file.rvt> [scene.bin]      viewer meshes per category (summary; optional binary)
-Each command prints JSON; add `-o out.json` to write a file instead.";
+  rvt object <file.rvt> <id>           any element as its schema class with typed fields
+  rvt classes <file.rvt>               schema class -> number of elements
+  rvt objects <file.rvt> --class <name> [--limit n]
+                                       elements of a class and its subclasses, as objects
+  rvt coverage <file.rvt>              decoded records per channel, top failing classes
+Each command prints JSON; add `-o out.json` to write a file instead, `--pretty` to indent.";
+
+/// The value after a `--name` option.
+fn opt<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
+    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).map(String::as_str)
+}
 
 /// Element tables per partition and chain, in the shape of the reference export
 /// (`partitions[].chains[].elements[] = {id, cat, tag, bbox}`).
@@ -285,12 +295,45 @@ fn run(args: &[String]) -> Result<Value, String> {
                 .collect();
             Ok(json!({"chains": chains}))
         }
+        "object" => {
+            let id: u64 = args.get(2).and_then(|s| s.parse().ok()).ok_or(USAGE)?;
+            let doc = rvt_read::Document::open(path).map_err(err)?;
+            match doc.object(id) {
+                Some(o) => to(serde_json::to_value(o)),
+                None if doc.object_store().is_none() => Err(format!("{path}: no object records (schema or partition records not readable)")),
+                None => Err(format!("{path}: no object record for element {id}")),
+            }
+        }
+        "classes" => {
+            let doc = rvt_read::Document::open(path).map_err(err)?;
+            if doc.object_store().is_none() {
+                return Err(format!("{path}: no object records (schema or partition records not readable)"));
+            }
+            Ok(json!({"classes": doc.classes()}))
+        }
+        "objects" => {
+            let class = opt(args, "--class").ok_or(USAGE)?;
+            let limit: usize = match opt(args, "--limit") {
+                Some(n) => n.parse().map_err(|_| USAGE.to_string())?,
+                None => usize::MAX,
+            };
+            let doc = rvt_read::Document::open(path).map_err(err)?;
+            let ids = doc.object_ids_of_class(class);
+            let objects: Vec<_> = ids.iter().take(limit).filter_map(|&id| doc.object(id)).collect();
+            Ok(json!({"class": class, "total": ids.len(), "objects": objects}))
+        }
+        "coverage" => {
+            let doc = rvt_read::Document::open(path).map_err(err)?;
+            to(serde_json::to_value(doc.object_coverage()))
+        }
         _ => Err(USAGE.into()),
     }
 }
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let pretty = args.iter().any(|a| a == "--pretty");
+    args.retain(|a| a != "--pretty");
     let out = args.iter().position(|a| a == "-o").map(|i| {
         let o = args.get(i + 1).cloned();
         args.drain(i..(i + 2).min(args.len()));
@@ -298,7 +341,7 @@ fn main() -> ExitCode {
     });
     match run(&args) {
         Ok(v) => {
-            let s = serde_json::to_string(&v).expect("json");
+            let s = if pretty { serde_json::to_string_pretty(&v) } else { serde_json::to_string(&v) }.expect("json");
             match out.flatten() {
                 Some(o) => match std::fs::write(&o, s) {
                     Ok(()) => ExitCode::SUCCESS,

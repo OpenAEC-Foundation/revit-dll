@@ -9,6 +9,7 @@ mod hosted;
 mod instances;
 mod levels;
 mod mep;
+pub mod objects;
 mod pads;
 mod params;
 mod printable_table;
@@ -75,6 +76,10 @@ pub struct Document {
     /// Open-research step 2303: the file, for reading the saved graphics on demand.
     path: Option<std::path::PathBuf>,
     saved: std::sync::OnceLock<Option<SavedGraphics>>,
+    /// Par C: the file itself when opened from memory (the object records are read on demand).
+    source: Option<Cfb>,
+    /// Par C: object records (channel 102) and element headers (channel 101) with the schema.
+    objects: std::sync::OnceLock<Option<objects::ObjectStore>>,
 }
 
 /// Revit's own saved graphics (open-research, steps 2300–2303): the file's schema and the
@@ -101,7 +106,9 @@ impl Document {
     /// Opens a file from memory (for example bytes received over IPC).
     pub fn from_bytes(data: Vec<u8>) -> Result<Self> {
         let cfb = Cfb::from_bytes(data)?;
-        Ok(Self::from_partitions(read_partitions(&cfb)?))
+        let mut doc = Self::from_partitions(read_partitions(&cfb)?);
+        doc.source = Some(cfb);
+        Ok(doc)
     }
 
     /// Elevation of a level (feet), over chain 0 of all partitions.
@@ -160,6 +167,58 @@ impl Document {
                 Some(SavedGraphics { schema, bodies: recs.into_iter().map(|(k, r)| (k, r.body)).collect(), styles, objects, demolished })
             })
             .as_ref()
+    }
+
+    /// The compound file again: reopened from the path, or the one kept by `from_bytes`.
+    fn with_cfb<T>(&self, f: impl FnOnce(&Cfb) -> Option<T>) -> Option<T> {
+        match (&self.source, &self.path) {
+            (Some(c), _) => f(c),
+            (None, Some(p)) => f(&Cfb::open(p).ok()?),
+            _ => None,
+        }
+    }
+
+    /// Par C: the object records of the file (read once, on first use); none when the file has
+    /// no readable schema or partition records (files before Revit 2023).
+    pub fn object_store(&self) -> Option<&objects::ObjectStore> {
+        self.objects.get_or_init(|| self.with_cfb(|c| objects::ObjectStore::read(c).ok()).filter(|s| !s.records.is_empty())).as_ref()
+    }
+
+    /// Par C: any element as an object of its schema class: class, ancestors, typed fields,
+    /// element references as ids, nested objects. None when the element has no object record.
+    pub fn object(&self, id: u64) -> Option<rvt_model::ObjectView> {
+        self.object_store()?.view(id, self.element(id).map(|e| e.category as i64))
+    }
+
+    /// Par C: ids (ascending) of the elements whose class is `class` or derives from it
+    /// (e.g. `VWall` gives straight and arc walls, `Element` every element).
+    pub fn object_ids_of_class(&self, class: &str) -> Vec<u64> {
+        self.object_store().map(|s| s.ids_of_class(class)).unwrap_or_default()
+    }
+
+    /// Par C: the elements of a class and its subclasses as objects, by ascending id.
+    pub fn objects_of_class(&self, class: &str) -> Vec<rvt_model::ObjectView> {
+        self.object_ids_of_class(class).into_iter().filter_map(|id| self.object(id)).collect()
+    }
+
+    /// Par C: class name → number of elements whose object record has that class.
+    pub fn classes(&self) -> std::collections::BTreeMap<String, usize> {
+        self.object_store().map(|s| s.classes()).unwrap_or_default()
+    }
+
+    /// Par C: how many partition records of channels 101, 102 and 103 decode completely, with
+    /// the ten root classes that fail most and why.
+    pub fn object_coverage(&self) -> rvt_model::Coverage {
+        let info = self.info();
+        let mut cov = rvt_model::Coverage { file: self.path.as_ref().map(|p| p.display().to_string()).unwrap_or_default(), version: info.version, bits: info.bits, channels: Vec::new() };
+        let Some(store) = self.object_store() else { return cov };
+        cov.channels.push(objects::channel_coverage(&store.schema, &store.es, 101, &store.headers));
+        cov.channels.push(objects::channel_coverage(&store.schema, &store.es, 102, &store.records));
+        if let Some(g) = self.with_cfb(|c| rvt_core::records::file_channel(c, &store.schema, 103).ok()) {
+            let bodies: HashMap<u64, Vec<u8>> = g.into_iter().map(|(k, r)| (k, r.body)).collect();
+            cov.channels.push(objects::channel_coverage(&store.schema, &store.es, 103, &bodies));
+        }
+        cov
     }
 
     pub fn from_partitions(partitions: Vec<Partition>) -> Self {
@@ -229,6 +288,8 @@ impl Document {
             rail_types: HashMap::new(),
             path: None,
             saved: std::sync::OnceLock::new(),
+            source: None,
+            objects: std::sync::OnceLock::new(),
         };
         doc.rail_types = railings::rail_types(doc.partitions.iter().flat_map(|p| p.chains.iter()));
         let mut systems: Vec<MepSystem> = Vec::new();
