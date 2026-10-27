@@ -258,7 +258,7 @@ fn visibility(flags: u64) -> u8 {
 }
 
 fn element_id(v: &Value) -> Option<i64> {
-    v.as_obj()?.get("m_id")?.as_obj()?.get("m_id64")?.as_i64()
+    v.element_id()
 }
 
 fn read_trf(t: &Object) -> Option<Xf> {

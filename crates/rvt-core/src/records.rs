@@ -15,7 +15,10 @@
 //! continued segments form one group. A group is a run of records: `u64` element id, a header
 //! (`u32` on channel 101, `u64` on 102 and 103) whose last 4 bytes are the body length, the body,
 //! the length again. Channel 101 holds the element records the rest of this crate reads, 103 the
-//! element's saved graphics (root class `GElement`), 102 its object graph. Revit 2024+ (64-bit ids).
+//! element's saved graphics (root class `GElement`), 102 its object graph. Revit 2024+ (64-bit ids);
+//! step 2307: files with 32-bit ids (Revit 2023, Storax NAS models) store the id as a `u32`, the
+//! rest alike (storax_icarus: 1104 / 13 / 1 records in the first group of 101 / 102 / 103, every
+//! trailing length matching; the first id 32899 is the first element of the file).
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -47,6 +50,11 @@ pub struct Record {
 /// The records of `channel` in one stripped partition stream, by element id (a later copy of an
 /// id replaces an earlier one). Only content block 1 when `main_only`.
 pub fn channel_records(raw: &[u8], m: Markers, channel: u64, main_only: bool) -> Result<HashMap<u64, Record>> {
+    channel_records_ids(raw, m, channel, main_only, 8)
+}
+
+/// As `channel_records`, with element ids of `id_bytes` (8: Revit 2024+, 4: 32-bit files).
+pub fn channel_records_ids(raw: &[u8], m: Markers, channel: u64, main_only: bool, id_bytes: usize) -> Result<HashMap<u64, Record>> {
     let mut out = HashMap::new();
     let mut p = 8usize;
     let mut content = 0usize;
@@ -74,7 +82,7 @@ pub fn channel_records(raw: &[u8], m: Markers, channel: u64, main_only: bool) ->
                 flate2::read::GzDecoder::new(member).read_to_end(&mut group)?;
             }
             if flags & 2 == 0 && gch == channel && (!main_only || content == 1) {
-                split(&group, channel, content, &mut out)?;
+                split(&group, channel, content, id_bytes, &mut out)?;
                 group.clear();
             }
         } else if t == m.checkback {
@@ -102,13 +110,13 @@ pub fn channel_records(raw: &[u8], m: Markers, channel: u64, main_only: bool) ->
     Ok(out)
 }
 
-fn split(g: &[u8], channel: u64, content: usize, out: &mut HashMap<u64, Record>) -> Result<()> {
+fn split(g: &[u8], channel: u64, content: usize, id_bytes: usize, out: &mut HashMap<u64, Record>) -> Result<()> {
     let hdr = if channel == 101 { 4 } else { 8 };
     let mut q = 0usize;
-    while q + 8 + hdr <= g.len() {
-        let id = le_u64(g, q)?;
-        let len = le_u32(g, q + 8 + hdr - 4)? as usize;
-        let start = q + 8 + hdr;
+    while q + id_bytes + hdr <= g.len() {
+        let id = if id_bytes == 4 { le_u32(g, q)? as u64 } else { le_u64(g, q)? };
+        let len = le_u32(g, q + id_bytes + hdr - 4)? as usize;
+        let start = q + id_bytes + hdr;
         let body = g.get(start..start + len).ok_or_else(|| Error::Format(format!("record {id} past group end")))?;
         if le_u32(g, start + len)? as usize != len {
             return Err(Error::Format(format!("record {id}: trailing length differs")));
@@ -119,13 +127,30 @@ fn split(g: &[u8], channel: u64, content: usize, out: &mut HashMap<u64, Record>)
     Ok(())
 }
 
-/// The records of `channel` of every partition of a file (64-bit files), by element id.
+/// The records of `channel` of every partition of a file, by element id. The id width (8 or 4
+/// bytes) is the one whose records split exactly.
 pub fn file_channel(cfb: &Cfb, schema: &Schema, channel: u64) -> Result<HashMap<u64, Record>> {
     let m = Markers::from_schema(schema).ok_or_else(|| Error::Format("schema has no partition markers".into()))?;
     let mut out = HashMap::new();
+    let mut width: Option<usize> = None;
     for (path, _) in cfb.paths().into_iter().filter(|(p, _)| p.starts_with("Partitions/")) {
         let raw = crate::chain::strip_inserted(&cfb.stream(&path)?);
-        out.extend(channel_records(&raw, m, channel, true)?);
+        let recs = match width {
+            Some(w) => channel_records_ids(&raw, m, channel, true, w)?,
+            None => match channel_records_ids(&raw, m, channel, true, 8) {
+                Ok(r) => {
+                    if !r.is_empty() {
+                        width = Some(8);
+                    }
+                    r
+                }
+                Err(_) => {
+                    width = Some(4);
+                    channel_records_ids(&raw, m, channel, true, 4)?
+                }
+            },
+        };
+        out.extend(recs);
     }
     Ok(out)
 }

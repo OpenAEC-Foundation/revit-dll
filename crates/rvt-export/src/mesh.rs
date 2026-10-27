@@ -1265,7 +1265,11 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
     // the batches they replace are known now, and the readers below skip them
     let mut replaced: std::collections::HashSet<&'static str> = Default::default();
     let mut saved_job = None;
-    if let Some(sg) = std::env::var_os("RVT_NO_SAVED").is_none().then(|| doc.saved_graphics()).flatten() {
+    // step 2307: 32-bit files (Revit 2023, the Storax NAS models) decode as well, but which of their
+    // worksets (partitions) a default 3D view shows is not known yet (storax_lamellengevels:
+    // elements of Partitions/4 and /5 hundreds of feet away); RVT_SAVED_32=1 enables them
+    let bits32 = doc.info().bits == Some(32) && std::env::var_os("RVT_SAVED_32").is_none();
+    if let Some(sg) = (std::env::var_os("RVT_NO_SAVED").is_none() && !bits32).then(|| doc.saved_graphics()).flatten() {
         let mut skip = group_defs.clone();
         // walls without a compound type are drawn by their panels (step 2215)
         skip.extend(walls_all.iter().filter(|w| doc.type_thickness(w.wall_type).map_or(true, |t| t <= 0.0)).map(|w| w.id));

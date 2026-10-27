@@ -14,7 +14,17 @@ fn main() {
             continue;
         }
         let class = e.class_tag.and_then(|t| sg.schema.class(t)).map_or("?", |c| c.name.as_str());
-        let n = m.element(e.id).map_or(0, |t| t.len());
-        println!("{}\t{}\t{}\t{}", e.id, e.category, class, n);
+        let t = m.element(e.id);
+        let n = t.as_ref().map_or(0, |t| t.len());
+        // the triangles' box and the stored box (xmin ymin zmin xmax ymax zmax)
+        let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+        for p in t.iter().flatten().flatten() {
+            for k in 0..3 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
+            }
+        }
+        let bb = e.bbox.map_or(String::new(), |b| format!("{:.3?}", b));
+        println!("{}\t{}\t{}\t{}\t{:.3?}\t{:.3?}\t{}\t{}", e.id, e.category, class, n, lo, hi, bb, e.chain);
     }
 }

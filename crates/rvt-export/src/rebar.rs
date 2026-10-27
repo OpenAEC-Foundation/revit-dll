@@ -20,7 +20,7 @@ use rvt_read::SavedGraphics;
 type P3 = [f64; 3];
 
 fn id_of(v: &Value) -> Option<i64> {
-    v.as_obj()?.get("m_id")?.as_obj()?.get("m_id64")?.as_i64()
+    v.element_id()
 }
 
 fn graph(sg: &SavedGraphics, id: u64) -> Option<Graph> {

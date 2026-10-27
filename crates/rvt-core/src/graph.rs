@@ -78,6 +78,12 @@ impl Value {
             _ => None,
         }
     }
+    /// The id of an `ElementId` value: `m_id` → `Identifier`, whose `m_id64` (Revit 2024+) or
+    /// `m_id` (32-bit files, step 2307) holds it.
+    pub fn element_id(&self) -> Option<i64> {
+        let ident = self.as_obj()?.get("m_id")?.as_obj()?;
+        ident.get("m_id64").or_else(|| ident.get("m_id"))?.as_i64()
+    }
     /// A list of numbers (a fixed f64 array, a point).
     pub fn floats(&self) -> Option<Vec<f64>> {
         self.as_list()?.iter().map(|v| v.as_f64()).collect()

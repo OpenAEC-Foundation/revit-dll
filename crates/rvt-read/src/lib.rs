@@ -139,7 +139,7 @@ impl Document {
                             continue;
                         }
                         let cat = rvt_core::graph::Graph::decode(&schema, &r.body).ok().and_then(|g| {
-                            let v = g.objects.first()?.get("m_categoryId")?.as_obj()?.get("m_id")?.as_obj()?.get("m_id64")?.as_i64();
+                            let v = g.objects.first()?.get("m_categoryId")?.element_id();
                             v
                         });
                         if let Some(c) = cat {
