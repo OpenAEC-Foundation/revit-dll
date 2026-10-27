@@ -350,6 +350,10 @@ fn face_triangles(s: &Schema, g: &Graph, fi: usize) -> Option<Vec<[P3; 3]>> {
     if loops.is_empty() || loops[0].len() < 3 {
         return None;
     }
+    // RVT_SAVED_FACE=<index>: the UV loops of that face object
+    if std::env::var("RVT_SAVED_FACE").ok().and_then(|v| v.parse::<usize>().ok()) == Some(fi) {
+        eprintln!("face {fi} loops {:?}", loops.iter().map(|l| l.iter().map(|p| [(p[0] * 1000.0).round() / 1000.0, (p[1] * 1000.0).round() / 1000.0]).collect::<Vec<_>>()).collect::<Vec<_>>());
+    }
     // the largest loop first (the first loop need not be the outer one: door 505974's glass
     // openings); holes and further outer loops are told apart below
     let area = |l: &Vec<[f64; 2]>| -> f64 { (0..l.len()).map(|k| { let (a, b) = (l[k], l[(k + 1) % l.len()]); a[0] * b[1] - b[0] * a[1] }).sum::<f64>() / 2.0 };

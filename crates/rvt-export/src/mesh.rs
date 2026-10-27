@@ -20,6 +20,9 @@ pub struct Batch {
     pub positions: Vec<f32>,
     pub normals: Vec<f32>,
     pub indices: Vec<u32>,
+    /// Elements drawn in this batch (step 2309; saved-graphics batches only): element id, first
+    /// index and index count in `indices`.
+    pub elements: Vec<(u64, u32, u32)>,
 }
 
 /// All batches plus bounds (view coordinates).
@@ -28,6 +31,8 @@ pub struct Scene {
     pub batches: Vec<Batch>,
     pub bounds_min: [f32; 3],
     pub bounds_max: [f32; 3],
+    /// Levels of the project (step 2309): name and elevation in view metres (the view's y).
+    pub levels: Vec<(String, f32)>,
 }
 
 type P3 = [f64; 3];
@@ -1156,8 +1161,13 @@ fn saved_batches(doc: &Document, cands: Vec<SavedCand>) -> BTreeMap<&'static str
                                 let a: f64 = tris.iter().map(|t| norm(cross(sub(t[1], t[0]), sub(t[2], t[0]))) / 2.0).sum();
                                 eprintln!("saved element {} {} {:.2} ft2", c.id, c.name, a);
                             }
+                            let first = b.indices.len() as u32;
                             for t in tris {
                                 b.tri(t[0], t[1], t[2]);
+                            }
+                            let count = b.indices.len() as u32 - first;
+                            if count > 0 {
+                                b.elements.push((c.id, first, count));
                             }
                         }
                     }
@@ -1173,9 +1183,11 @@ fn saved_batches(doc: &Document, cands: Vec<SavedCand>) -> BTreeMap<&'static str
             match saved.get_mut(name) {
                 Some(acc) => {
                     let base = (acc.positions.len() / 3) as u32;
+                    let first = acc.indices.len() as u32;
                     acc.positions.extend_from_slice(&b.positions);
                     acc.normals.extend_from_slice(&b.normals);
                     acc.indices.extend(b.indices.iter().map(|i| i + base));
+                    acc.elements.extend(b.elements.iter().map(|&(id, f, n)| (id, f + first, n)));
                 }
                 None => {
                     saved.insert(name, b);
@@ -3622,6 +3634,16 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
         eprintln!("as box by category: {:?}", v.iter().take(8).map(|(c, n)| format!("{c}:{n}")).collect::<Vec<_>>());
     }
     let mut out = Scene { batches: batches.into_values().filter(|b| !b.indices.is_empty()).collect(), ..Default::default() };
+    // step 2309: the project levels (one per id, by elevation), for plan cuts and storeys
+    let mut seen_levels = std::collections::HashSet::new();
+    let mut levels: Vec<(String, f32)> = doc
+        .levels()
+        .into_iter()
+        .filter(|l| seen_levels.insert(l.id) && l.elevation.is_finite())
+        .map(|l| (l.name, (l.elevation * FT) as f32))
+        .collect();
+    levels.sort_by(|a, b| a.1.total_cmp(&b.1));
+    out.levels = levels;
     let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
     for b in &out.batches {
         for p in b.positions.chunks_exact(3) {
@@ -3665,6 +3687,27 @@ pub fn encode(scene: &Scene) -> Vec<u8> {
     }
     for v in scene.bounds_min.iter().chain(&scene.bounds_max) {
         b.extend_from_slice(&v.to_le_bytes());
+    }
+    // step 2309, optional trailer (older readers stop at the bounds): "ELMS", per batch u32 count
+    // and per element u64 id, u32 first index, u32 index count; "LVLS", u32 count and per level
+    // u32 name length, name (UTF-8, padded to 4), f32 elevation (view metres)
+    b.extend_from_slice(b"ELMS");
+    for x in &scene.batches {
+        b.extend_from_slice(&(x.elements.len() as u32).to_le_bytes());
+        for &(id, first, count) in &x.elements {
+            b.extend_from_slice(&id.to_le_bytes());
+            b.extend_from_slice(&first.to_le_bytes());
+            b.extend_from_slice(&count.to_le_bytes());
+        }
+    }
+    b.extend_from_slice(b"LVLS");
+    b.extend_from_slice(&(scene.levels.len() as u32).to_le_bytes());
+    for (name, z) in &scene.levels {
+        let n = name.as_bytes();
+        b.extend_from_slice(&(n.len() as u32).to_le_bytes());
+        b.extend_from_slice(n);
+        b.resize(b.len() + (4 - n.len() % 4) % 4, 0);
+        b.extend_from_slice(&z.to_le_bytes());
     }
     b
 }
