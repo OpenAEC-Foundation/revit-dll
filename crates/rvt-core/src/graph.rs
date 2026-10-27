@@ -132,6 +132,14 @@ impl Graph {
         Ok(Graph { objects })
     }
 
+    /// Only the root object of a record body (its pointer targets are not decoded; the rest of
+    /// the body is not checked). Cheap: for header fields such as the phases (step 2308).
+    pub fn decode_root(schema: &Schema, body: &[u8]) -> Result<Object> {
+        let mut d = Decoder { s: schema, b: body, p: 0, queue: Vec::new(), tokens: HashMap::new(), trail: Vec::new() };
+        let root = d.u16()?;
+        d.object(root)
+    }
+
     pub fn class_name<'a>(&self, schema: &'a Schema, i: usize) -> Option<&'a str> {
         self.objects.get(i).and_then(|o| schema.class(o.class)).map(|c| c.name.as_str())
     }

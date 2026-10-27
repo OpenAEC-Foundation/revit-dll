@@ -88,6 +88,10 @@ pub struct SavedGraphics {
     /// Channel-102 object records of the classes the saved graphics do not cover (rebar: no
     /// channel-103 record, step 2305), by element id.
     pub objects: HashMap<u64, Vec<u8>>,
+    /// Elements whose object-graph root names a demolished phase (`m_demolishedPhaseId` ≠ −1): not
+    /// in a {3D} view with 'Show Complete' (step 2308: storax_lamellengevels, 1510 elements
+    /// created in phase 12589 and demolished in phase 0; Revit shows none of them).
+    pub demolished: HashSet<u64>,
 }
 
 /// Classes whose channel-102 records `SavedGraphics::objects` keeps.
@@ -127,9 +131,15 @@ impl Document {
                 let recs = rvt_core::records::file_channel(&cfb, &schema, 103).ok()?;
                 let mut styles = HashMap::new();
                 let mut objects = HashMap::new();
+                let mut demolished = HashSet::new();
                 let keep: Vec<u16> = OBJECT_CLASSES.iter().filter_map(|c| schema.tag(c)).collect();
                 if let (Some(tag), Ok(objs)) = (schema.tag("GStyleElem"), rvt_core::records::file_channel(&cfb, &schema, 102)) {
                     for (id, r) in objs {
+                        if let Ok(o) = rvt_core::graph::Graph::decode_root(&schema, &r.body) {
+                            if o.get("m_demolishedPhaseId").and_then(|v| v.element_id()).is_some_and(|d| d != -1) {
+                                demolished.insert(id);
+                            }
+                        }
                         let root = r.body.get(..2).map(|b| u16::from_le_bytes([b[0], b[1]]));
                         if root.is_some_and(|t| keep.contains(&t)) {
                             objects.insert(id, r.body);
@@ -147,7 +157,7 @@ impl Document {
                         }
                     }
                 }
-                Some(SavedGraphics { schema, bodies: recs.into_iter().map(|(k, r)| (k, r.body)).collect(), styles, objects })
+                Some(SavedGraphics { schema, bodies: recs.into_iter().map(|(k, r)| (k, r.body)).collect(), styles, objects, demolished })
             })
             .as_ref()
     }
