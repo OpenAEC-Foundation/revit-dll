@@ -10,7 +10,8 @@
 //! - base 14 (object) with modifier low nibble 0 (inline object, or 0x50 a vector of them): a class
 //!   reference follows; pointers (low nibble 1..=3) carry none;
 //! - base 13 (nested): `u32 k` (1 seen), `u8` (0x20 seen), then `k` inner descriptors; an inline
-//!   object inside repeats its class reference once per outer array element.
+//!   object inside repeats its class reference once per outer array element (twice under an
+//!   outer vector over a fixed array: Revit 2018 `SiteSurface.m_facets`).
 //! A class reference is a `u16`; bit 0x8000 means the referenced class is defined right here
 //! (inline). A class's tag is 12 + its position in definition order, inline ones included; a
 //! reference's low 15 bits are that tag.
@@ -197,7 +198,15 @@ impl Parser<'_> {
             let k = self.u32(o)?;
             o += 5;
             for _ in 0..k {
-                let (f, n) = self.descriptor(String::new(), o, count.max(1))?;
+                // an inline object inside repeats its class reference once per element of a fixed
+                // outer array; a nested field without a count over a fixed array of inline objects
+                // writes it twice (par B: Revit 2018 `SiteSurface.m_facets`, `0x500d` over
+                // `0x100e`, references `0x14 0x14`; the only such field in the 2014–2026 schemas;
+                // rvt-rs, Apache-2.0, `src/schema_registry.rs` #421 describes the same)
+                let d = self.u32(o)?;
+                let fixed_inline = d & 0xff == 14 && (0x10..=0x13).contains(&((d >> 8) & 0xff));
+                let repeat = if count > 0 { count } else if fixed_inline { 2 } else { 1 };
+                let (f, n) = self.descriptor(String::new(), o, repeat)?;
                 inner = Some(Box::new(f));
                 o = n;
             }
