@@ -243,3 +243,30 @@ impl Parser<'_> {
         Ok(o)
     }
 }
+
+/// Builds the inflated bytes of a small `Formats/Latest` for tests (par C): classes in tag order
+/// (12, 13, ...) as (name, parent tag, fields), a field as (name, descriptor, class reference of an
+/// inline object). No fixed arrays or nested fields.
+#[doc(hidden)]
+pub fn test_schema_bytes(classes: &[(&str, Option<u16>, &[(&str, u32, Option<u16>)])]) -> Vec<u8> {
+    let mut b = Vec::new();
+    for (name, parent, fields) in classes {
+        b.extend_from_slice(&0u16.to_le_bytes());
+        b.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        b.extend_from_slice(name.as_bytes());
+        b.extend_from_slice(&parent.unwrap_or(0).to_le_bytes());
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&(fields.len() as u32).to_le_bytes());
+        for (fname, desc, class) in fields.iter() {
+            b.extend_from_slice(&(fname.len() as u32).to_le_bytes());
+            b.extend_from_slice(fname.as_bytes());
+            b.extend_from_slice(&desc.to_le_bytes());
+            if let Some(c) = class {
+                b.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        b.extend_from_slice(&0u32.to_le_bytes());
+    }
+    b.extend_from_slice(&[0; 8]);
+    b
+}
