@@ -38,10 +38,11 @@ A port counts as done only when the Rust output matches the reference export:
 | Railings (§35: path, type, host, placement offset, level, height, top rail height/type; `top_rail` sub-record still open) | **done** (core) | 112 files, 246 railings, 0 mismatches |
 | Stairs runs (step 722: width, base/top elevation) | **done** | 111 files, 56 runs, 0 mismatches |
 | Stairs (§33: riser, tread, base/top level and offset, height, risers, base z, runs, run geometry: sketch lines + cached walk path incl. helix; 2014–2017 layout; `type` still open) | **done** (core + run geometry) | 111 files, 39 stairs, 0 mismatches |
-| Other semantic readers (≈ 200 lists of the reference export) | not started | — |
-| Query API: `Document::open`, `info`, `element(id)`, `elements()`, `elements_in_category`, `levels`, `walls` | **started** | CLI `rvt info/element/category/levels` |
+| Generic objects (par C): every element as its schema class with typed fields (channel 102 + header 101, `Formats/Latest`; extensible storage via the ES schemas in `Global/Latest`) | **done** | 117 files 2020–2026 + 2014–2021 sample: 101/102/103 100 % decoded (1 empty record per file excepted); levels 332/332, walls 1622/1622, materials 763/763 against typed readers / reference (see `docs/par-generic-objects.md`) |
+| Other semantic readers (≈ 200 lists of the reference export) | not started (raw fields reachable through the generic objects) | — |
+| Query API: `Document::open`, `info`, `element(id)`, `elements()`, `elements_in_category`, `levels`, `walls`; `object(id)`, `objects_of_class`, `classes`, `object_coverage` (par C) | **started** | CLI `rvt info/element/category/levels/object/objects/classes/coverage` |
 | Exporters | not started | — |
-| C ABI | stub | — |
+| C ABI | **started**: `rvt_open`, `rvt_query` (info, object, classes, objects), `rvt_free`, `rvt_close` | unit tests |
 
 ## Crates
 
