@@ -101,7 +101,12 @@ fn run(args: &[String]) -> Result<Value, String> {
             Ok(json!({"wall_types": doc.compound_types()}))
         }
         "mesh" => {
-            let doc = rvt_read::Document::open(path).map_err(err)?;
+            // RVT_FROM_BYTES=1: open from memory, as the viewer does over IPC
+            let doc = if std::env::var_os("RVT_FROM_BYTES").is_some() {
+                rvt_read::Document::from_bytes(std::fs::read(path).map_err(|e| e.to_string())?).map_err(err)?
+            } else {
+                rvt_read::Document::open(path).map_err(err)?
+            };
             let t = std::time::Instant::now();
             let scene = rvt_export::mesh::scene(&doc);
             let ms = t.elapsed().as_millis();

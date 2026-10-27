@@ -133,14 +133,23 @@ impl Document {
     pub fn saved_graphics(&self) -> Option<&SavedGraphics> {
         self.saved
             .get_or_init(|| {
-                let cfb = Cfb::open(self.path.as_ref()?).ok()?;
-                let schema = rvt_core::Schema::read(&cfb).ok()?;
-                let recs = rvt_core::records::file_channel(&cfb, &schema, 103).ok()?;
+                // the file in memory (from_bytes: the viewer passes the bytes over IPC; without this
+                // the app never used saved graphics, step 2309b), else reopened from its path
+                let opened;
+                let cfb: &Cfb = match &self.source {
+                    Some(c) => c,
+                    None => {
+                        opened = Cfb::open(self.path.as_ref()?).ok()?;
+                        &opened
+                    }
+                };
+                let schema = rvt_core::Schema::read(cfb).ok()?;
+                let recs = rvt_core::records::file_channel(cfb, &schema, 103).ok()?;
                 let mut styles = HashMap::new();
                 let mut objects = HashMap::new();
                 let mut demolished = HashSet::new();
                 let keep: Vec<u16> = OBJECT_CLASSES.iter().filter_map(|c| schema.tag(c)).collect();
-                if let (Some(tag), Ok(objs)) = (schema.tag("GStyleElem"), rvt_core::records::file_channel(&cfb, &schema, 102)) {
+                if let (Some(tag), Ok(objs)) = (schema.tag("GStyleElem"), rvt_core::records::file_channel(cfb, &schema, 102)) {
                     for (id, r) in objs {
                         if let Ok(o) = rvt_core::graph::Graph::decode_root(&schema, &r.body) {
                             if o.get("m_demolishedPhaseId").and_then(|v| v.element_id()).is_some_and(|d| d != -1) {
