@@ -14,7 +14,7 @@ fn show(s: &rvt_core::Schema, v: &Value, depth: usize) -> String {
             format!("[{}{}]", items.join(", "), if l.len() > 6 { format!(", …{}", l.len()) } else { String::new() })
         }
         Value::Obj(o) => {
-            if depth > 2 { return format!("{}{{…}}", s.class(o.class).map_or("?", |c| &c.name)); }
+            if depth > std::env::var("GRAPH_DEPTH").ok().and_then(|d| d.parse().ok()).unwrap_or(2) { return format!("{}{{…}}", s.class(o.class).map_or("?", |c| &c.name)); }
             let f: Vec<String> = o.fields.iter().map(|(n, v)| format!("{n}={}", show(s, v, depth + 1))).collect();
             format!("{}{{{}}}", s.class(o.class).map_or("?", |c| &c.name), f.join(" "))
         }

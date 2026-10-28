@@ -1189,6 +1189,20 @@ fn saved_batches(doc: &Document, cands: Vec<SavedCand>) -> BTreeMap<&'static str
                                     }
                                 }
                             }
+                            if std::env::var_os("RVT_MESH_MATS").is_some() {
+                                let mut by: BTreeMap<i64, usize> = BTreeMap::new();
+                                for &m in &t.mats {
+                                    *by.entry(m).or_default() += 1;
+                                }
+                                let s: Vec<String> = by
+                                    .iter()
+                                    .map(|(m, n)| match props.material(*m) {
+                                        Some(i) => format!("{m}:{n}:{}:{:?}:{:.2}", i.name, i.rgb, i.transparency),
+                                        None => format!("{m}:{n}:-"),
+                                    })
+                                    .collect();
+                                eprintln!("mats {} {} {}", c.id, c.name, s.join(" | "));
+                            }
                             let count = b.indices.len() as u32 - first;
                             if count > 0 {
                                 b.elements.push((c.id, first, count));
@@ -1238,6 +1252,10 @@ fn saved_batch(cat: i32) -> Option<(&'static str, [f32; 3], bool)> {
         -2000035 => ("Roofs", [0.60, 0.30, 0.18], true),
         -2001392 => ("Slab edges", [0.62, 0.60, 0.56], true),
         -2000120 => ("Stairs", [0.70, 0.66, 0.60], true),
+        // runs, landings and supports (stringers, carriages) have their own saved graphics: the
+        // stair's record does not hold them (snowdon arch 2025: 885 m² of 60 runs/landings and
+        // 170 supports missing against Revit's {3D} view)
+        -2000919 | -2000920 | -2000123 => ("Stairs", [0.70, 0.66, 0.60], false),
         -2000126 | -2000946 | -2000947 | -2000948 => ("Railings", [0.45, 0.47, 0.50], true),
         // step 2310: Toposolid (Revit 2024+ terrain, 3077 R26: its terrain was not drawn) with the
         // older topography surfaces
@@ -1251,9 +1269,9 @@ fn saved_batch(cat: i32) -> Option<(&'static str, [f32; 3], bool)> {
         -2008049 => ("Pipe fittings", [0.30, 0.70, 0.45], true),
         // step 2305: from the bar centerlines (no saved graphics)
         -2009000 => ("Rebar", [0.70, 0.25, 0.20], false),
-        // balusters are drawn with their railing, stair runs/landings/supports with their stair;
-        // masses are hidden, boundary conditions analytical ('Show Mass' off)
-        -2000127 | -2000123 | -2000919 | -2000920 | -2003499..=-2003400 | -2005301 => return None,
+        // balusters are drawn with their railing; masses are hidden, boundary conditions analytical
+        // ('Show Mass' off)
+        -2000127 | -2003499..=-2003400 | -2005301 => return None,
         _ => {
             let (name, color) = instance_batch(cat);
             (name, color, name != "Other family instances")
