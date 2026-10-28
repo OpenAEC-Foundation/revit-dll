@@ -369,6 +369,7 @@ dependencies = [
  "rvt-core",
  "rvt-model",
  "rvt-read",
+ "serde",
 ]
 
 [[package]]

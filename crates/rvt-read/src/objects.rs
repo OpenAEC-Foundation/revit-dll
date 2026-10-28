@@ -182,6 +182,30 @@ impl ObjectStore {
     }
 }
 
+impl ObjectStore {
+    /// The root object of an element alone: its fields, no pointer targets (`objects` empty,
+    /// pointers as `{"ref"}` without target), no header and category. Much faster than `view`
+    /// for large records of which only scalar fields and inline objects are needed (views: a
+    /// `DBView` graph carries dozens of override objects). `complete` is false.
+    pub fn root_view(&self, id: u64) -> Option<ObjectView> {
+        let body = self.records.get(&id)?;
+        let tag = root_tag(body)?;
+        let root = Graph::decode_root(&self.schema, body).ok()?;
+        let conv = Conv { s: &self.schema, n: usize::MAX, graph: None };
+        Some(ObjectView {
+            id,
+            class: self.schema.class(tag).map_or_else(|| format!("#{tag}"), |c| c.name.clone()),
+            parents: self.parents(tag),
+            category: None,
+            complete: false,
+            error: None,
+            fields: conv.object(&root, &mut Vec::new()).fields,
+            objects: Vec::new(),
+            header: None,
+        })
+    }
+}
+
 /// Graph values to `FieldValue`s.
 struct Conv<'a> {
     s: &'a Schema,
@@ -409,6 +433,18 @@ mod tests {
         let bad = s.view(43, None).unwrap();
         assert!(!bad.complete && bad.error.is_some());
         assert!(s.view(44, None).is_none());
+    }
+
+    #[test]
+    fn root_view_has_the_root_fields_only() {
+        let s = store();
+        let full = s.view(42, None).unwrap();
+        let root = s.root_view(42).unwrap();
+        assert_eq!(root.fields, full.fields);
+        assert_eq!((root.class.as_str(), root.complete, root.objects.len()), ("Thing", false, 0));
+        // the pointer is kept as a reference without a target
+        assert!(root.path(&["m_p", "v"]).is_none());
+        assert!(s.root_view(44).is_none());
     }
 
     #[test]

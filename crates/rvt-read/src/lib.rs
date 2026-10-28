@@ -203,6 +203,12 @@ impl Document {
         self.object_store()?.view(id, self.element(id).map(|e| e.category as i64))
     }
 
+    /// Par C: the root object of an element only (its own fields; no pointer targets, header or
+    /// category). For reading scalar fields of large records quickly (`rvt_export::views`).
+    pub fn object_root(&self, id: u64) -> Option<rvt_model::ObjectView> {
+        self.object_store()?.root_view(id)
+    }
+
     /// Par C: ids (ascending) of the elements whose class is `class` or derives from it
     /// (e.g. `VWall` gives straight and arc walls, `Element` every element).
     pub fn object_ids_of_class(&self, class: &str) -> Vec<u64> {

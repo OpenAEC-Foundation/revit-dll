@@ -36,7 +36,9 @@ const USAGE: &str = "usage:
   rvt objects <file.rvt> --class <name> [--limit n]
                                        elements of a class and its subclasses, as objects
   rvt coverage <file.rvt>              decoded records per channel, top failing classes
-Each command prints JSON; add `-o out.json` to write a file instead, `--pretty` to indent.";
+  rvt views <file.rvt> [--all] [--json] model views, one line each (id, kind, name, camera,
+                                       section box, level, cut); --all: templates, sheets, ...
+Each command except `views` prints JSON; add `-o out.json` to write a file instead, `--pretty` to indent.";
 
 /// The value after a `--name` option.
 fn opt<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
@@ -327,6 +329,12 @@ fn run(args: &[String]) -> Result<Value, String> {
             let objects: Vec<_> = ids.iter().take(limit).filter_map(|&id| doc.object(id)).collect();
             Ok(json!({"class": class, "total": ids.len(), "objects": objects}))
         }
+        "views" => {
+            let doc = rvt_read::Document::open(path).map_err(err)?;
+            let all = args.iter().any(|a| a == "--all");
+            let list = if all { rvt_export::views::all_views(&doc) } else { rvt_export::views::views(&doc) };
+            to(serde_json::to_value(json!({"views": list})))
+        }
         "coverage" => {
             let doc = rvt_read::Document::open(path).map_err(err)?;
             to(serde_json::to_value(doc.object_coverage()))
@@ -335,8 +343,74 @@ fn run(args: &[String]) -> Result<Value, String> {
     }
 }
 
+/// Three numbers, short.
+fn v3(v: [f64; 3]) -> String {
+    format!("({:.3}, {:.3}, {:.3})", v[0], v[1], v[2])
+}
+
+/// `rvt views`: one line per view (feet, model coordinates).
+fn views_text(doc: &rvt_read::Document, all: bool) -> String {
+    let list = if all { rvt_export::views::all_views(doc) } else { rvt_export::views::views(doc) };
+    let mut out = String::new();
+    for v in &list {
+        let mut line = format!("{:>9}  {:<14} {:?}", v.id, v.kind.name(), v.name);
+        if v.is_template {
+            line += "  template";
+        }
+        if v.owned {
+            line += "  owned";
+        }
+        if let Some(c) = &v.camera {
+            line += &format!("  eye {} fwd {} up {} {}", v3(c.eye), v3(c.forward), v3(c.up), if c.perspective { "persp" } else { "ortho" });
+            if let Some([h, w]) = c.fov {
+                line += &format!(" fov {:.1}x{:.1}deg", h.to_degrees(), w.to_degrees());
+            }
+        }
+        if let Some(b) = &v.section_box {
+            let (lo, hi) = b.world_bounds();
+            line += &format!("  box {}..{}", v3(lo), v3(hi));
+        }
+        if let Some((id, z)) = v.level {
+            line += &format!("  level {id} {:?} z {z:.3}", v.level_name.as_deref().unwrap_or(""));
+        }
+        if let Some(c) = v.cut_offset {
+            line += &format!(" cut +{c:.3}");
+        }
+        if let Some(s) = v.scale {
+            line += &format!("  1:{s}");
+        }
+        out += &line;
+        out.push('\n');
+    }
+    out += &format!("{} views\n", list.len());
+    out
+}
+
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("views") && !args.iter().any(|a| a == "--json") {
+        let Some(path) = args.get(1) else {
+            eprintln!("{USAGE}");
+            return ExitCode::from(2);
+        };
+        // RVT_FROM_BYTES=1: open from memory, as the viewer does
+        let doc = if std::env::var_os("RVT_FROM_BYTES").is_some() {
+            std::fs::read(path).map_err(rvt_core::Error::from).and_then(rvt_read::Document::from_bytes)
+        } else {
+            rvt_read::Document::open(path)
+        };
+        return match doc {
+            Ok(doc) => {
+                print!("{}", views_text(&doc, args.iter().any(|a| a == "--all")));
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("{path}: {e}");
+                ExitCode::from(2)
+            }
+        };
+    }
+    args.retain(|a| a != "--json");
     let pretty = args.iter().any(|a| a == "--pretty");
     args.retain(|a| a != "--pretty");
     let out = args.iter().position(|a| a == "-o").map(|i| {
