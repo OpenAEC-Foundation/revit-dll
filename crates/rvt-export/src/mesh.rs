@@ -1211,7 +1211,9 @@ fn saved_batch(cat: i32) -> Option<(&'static str, [f32; 3], bool)> {
         -2001392 => ("Slab edges", [0.62, 0.60, 0.56], true),
         -2000120 => ("Stairs", [0.70, 0.66, 0.60], true),
         -2000126 | -2000946 | -2000947 | -2000948 => ("Railings", [0.45, 0.47, 0.50], true),
-        -2001340 => ("Topography", [0.56, 0.64, 0.44], true),
+        // step 2310: Toposolid (Revit 2024+ terrain, 3077 R26: its terrain was not drawn) with the
+        // older topography surfaces
+        -2001340 | -2001079 => ("Topography", [0.56, 0.64, 0.44], true),
         -2001263 => ("Pads", [0.66, 0.60, 0.52], true),
         -2001370 => ("Entourage", [0.42, 0.45, 0.55], true),
         -2000180 => ("Ramps", [0.70, 0.66, 0.60], true),
