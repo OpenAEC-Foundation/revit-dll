@@ -509,6 +509,62 @@ fn face_triangles(s: &Schema, g: &Graph, fi: usize) -> Option<Vec<[P3; 3]>> {
                 None,
             )
         }
+        "HermiteSurf" => {
+            // step 2320: bicubic Hermite patches over the knots m_uParams × m_vParams; node
+            // (i, j) = m_NodeArray[j·nu + i] holds the point, the tangents ∂u and ∂v and the mixed
+            // derivative (snowdon arch 2025 'Twisty Trellis' walls, 76 faces skipped before)
+            let us = surf.get("m_uParams")?.floats()?;
+            let vs = surf.get("m_vParams")?.floats()?;
+            let (nu, nv) = (us.len(), vs.len());
+            if nu < 2 || nv < 2 {
+                return None;
+            }
+            let nodes: Vec<[P3; 4]> = surf
+                .get("m_NodeArray")?
+                .as_list()?
+                .iter()
+                .map(|n| {
+                    let n = n.as_obj()?;
+                    let p = n.get("m_iPoint")?.floats()?;
+                    let t = n.get("m_iTangent")?.as_list()?;
+                    let tu = t.first()?.floats()?;
+                    let tv = t.get(1)?.floats()?;
+                    let m = n.get("m_iMixedDer")?.floats()?;
+                    let v3 = |x: &Vec<f64>| -> Option<P3> { Some([*x.first()?, *x.get(1)?, *x.get(2)?]) };
+                    Some([v3(&p)?, v3(&tu)?, v3(&tv)?, v3(&m)?])
+                })
+                .collect::<Option<Vec<_>>>()?;
+            if nodes.len() != nu * nv {
+                return None;
+            }
+            let span = |ks: &[f64], x: f64| -> (usize, f64, f64) {
+                let i = ks.windows(2).position(|w| x <= w[1]).unwrap_or(ks.len() - 2);
+                let d = ks[i + 1] - ks[i];
+                (i, if d.abs() > 1e-12 { (x - ks[i]) / d } else { 0.0 }, d)
+            };
+            // two subdivisions per knot interval
+            let step = |ks: &[f64]| ks.windows(2).map(|w| (w[1] - w[0]).abs()).filter(|d| *d > 1e-12).fold(f64::INFINITY, f64::min) / 2.0;
+            let (su, sv) = (step(&us), step(&vs));
+            (
+                Box::new(move |uv: [f64; 2]| {
+                    let (i, s, du) = span(&us, uv[0]);
+                    let (j, t, dv) = span(&vs, uv[1]);
+                    let h = |x: f64| [2.0 * x * x * x - 3.0 * x * x + 1.0, -2.0 * x * x * x + 3.0 * x * x, x * x * x - 2.0 * x * x + x, x * x * x - x * x];
+                    let (hs, ht) = (h(s), h(t));
+                    let mut out = [0.0; 3];
+                    for (c, d) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                        let n = &nodes[(j + d) * nu + i + c];
+                        let w = [hs[c] * ht[d], hs[2 + c] * ht[d] * du, hs[c] * ht[2 + d] * dv, hs[2 + c] * ht[2 + d] * du * dv];
+                        for k in 0..3 {
+                            out[k] += w[0] * n[0][k] + w[1] * n[1][k] + w[2] * n[2][k] + w[3] * n[3][k];
+                        }
+                    }
+                    out
+                }),
+                su.is_finite().then_some(su),
+                sv.is_finite().then_some(sv),
+            )
+        }
         _ => {
             if env_flag(3) {
                 eprintln!("surface {sname}: {:?}", surf.fields.iter().map(|(n, v)| format!("{n}={}", format!("{v:?}").chars().take(120).collect::<String>())).collect::<Vec<_>>());
