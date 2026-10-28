@@ -595,12 +595,78 @@ impl Document {
         out
     }
 
+    /// Step 2314 (open-research): the design-option elements a default 3D view does not show,
+    /// read through the object graph. A `DesignOptionSet` names its options (`m_sDesignOptions`)
+    /// and its primary one (`m_mainDesignOption`); the view named "{3D}" can show another option of
+    /// a set (`DBView::m_oDesignOptionViewSettings` → `m_mOverridingOptions2`: set → option). An
+    /// element's option is `ElementHeader::m_designOptionId` (channel 101). Snowdon arch 2025:
+    /// 'Bandstand Options' has its primary first (1500724, 'Twisty Trellis'), the byte scan below
+    /// took the last as primary and hid 16 generic models and walls of the primary while it drew 17
+    /// floors, walls and slab edges of 'Bleacher Seating' 2059967 that Revit's {3D} view leaves out.
+    /// None without object records.
+    fn hidden_option_elements(&self) -> Option<HashSet<u64>> {
+        let store = self.object_store()?;
+        let mut out = HashSet::new();
+        let sets = store.ids_of_class("DesignOptionSet");
+        if sets.is_empty() {
+            return Some(out);
+        }
+        let mut shown: HashMap<i64, i64> = HashMap::new();
+        for v in store.ids_of_class("DBView3d") {
+            let Some(o) = self.object(v) else { continue };
+            if o.get("m_viewName").and_then(|n| n.as_str()) != Some("{3D}") || o.get("m_isTemplate").and_then(|t| t.as_i64()) == Some(1) {
+                continue;
+            }
+            let pairs = o.path(&["m_oDesignOptionViewSettings", "m_mOverridingOptions2"]).and_then(|l| l.as_list()).unwrap_or(&[]);
+            for p in pairs {
+                let p = match p {
+                    rvt_model::object::FieldValue::Object(n) => Some(n),
+                    rvt_model::object::FieldValue::Ref { target } => o.objects.get(*target),
+                    _ => None,
+                };
+                if let Some((s, opt)) = p.and_then(|p| Some((p.get("first")?.element()?, p.get("second")?.element()?))) {
+                    shown.insert(s, opt);
+                }
+            }
+            break;
+        }
+        let mut hidden: HashSet<i64> = HashSet::new();
+        for s in sets {
+            let Some(o) = self.object(s) else { continue };
+            let Some(main) = o.get("m_mainDesignOption").and_then(|v| v.element()) else { continue };
+            let show = shown.get(&(s as i64)).copied().unwrap_or(main);
+            for opt in o.get("m_sDesignOptions").and_then(|v| v.as_list()).unwrap_or(&[]) {
+                if let Some(opt) = opt.element().filter(|q| *q != show && *q > 0) {
+                    hidden.insert(opt);
+                }
+            }
+        }
+        if hidden.is_empty() {
+            return Some(out);
+        }
+        // headers holding one of the hidden option ids (its low 4 bytes: 32-bit files store i32 ids)
+        // are decoded to confirm the field
+        let needles: Vec<[u8; 4]> = hidden.iter().map(|h| (*h as u32).to_le_bytes()).collect();
+        for (&id, body) in &store.headers {
+            if !body.windows(4).any(|w| needles.iter().any(|n| n == w)) {
+                continue;
+            }
+            if store.header(id).and_then(|h| h.get("m_designOptionId").and_then(|v| v.element())).is_some_and(|d| hidden.contains(&d)) {
+                out.insert(id);
+            }
+        }
+        Some(out)
+    }
+
     /// Step 2284: elements of a design option that is not its set's primary (API: a {3D} view
     /// shows the primary options). An option set (cat −2006112) lists its options (cat −2006114)
     /// and names the primary last (snowdon arch 2025 'Bleacher Seating': 2059967, 2059970, primary
     /// 2059970 'Middle Stair'); an element carries its option id in its header (first 300 bytes;
     /// snowdon floors 2062310.. and their slab edges in 2059967: absent from Revit's geometry).
     pub fn secondary_option_elements(&self) -> HashSet<u64> {
+        if let Some(out) = self.hidden_option_elements() {
+            return out;
+        }
         let options: HashSet<u64> = self.elements_in_category(-2006114).map(|e| e.id).collect();
         let mut secondary: HashSet<u64> = HashSet::new();
         for set in self.elements_in_category(-2006112) {
