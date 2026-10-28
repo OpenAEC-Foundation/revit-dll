@@ -54,6 +54,27 @@ impl<'a> Props<'a> {
         self.materials.get(&id).and_then(|m| m.as_ref())
     }
 
+    /// The colour Revit's shaded view gives a face without material (step 2317): the project's
+    /// material named "Default" (Revit templates carry "Default", "Default Wall", "Default Roof",
+    /// "Default Floor" and "Default Light Source"; the last four are category and light-source
+    /// materials, "Default" the fallback; 127, 127, 127 in 3077 R26 and the Autodesk samples),
+    /// else that grey.
+    pub fn default_rgb(doc: &Document) -> [u8; 3] {
+        let mut best: Option<(u64, [u8; 3])> = None;
+        for id in doc.object_ids_of_class("MaterialElem") {
+            let Some(o) = doc.object(id) else { continue };
+            let Some(mat) = o.get("m_pMaterial").and_then(|v| o.deref(v)) else { continue };
+            if mat.get("m_name").and_then(|v| v.as_str()) != Some("Default") {
+                continue;
+            }
+            let Some(color) = mat.get("m_color").and_then(|v| v.as_i64()) else { continue };
+            if best.is_none_or(|(b, _)| id < b) {
+                best = Some((id, [(color & 0xff) as u8, ((color >> 8) & 0xff) as u8, ((color >> 16) & 0xff) as u8]));
+            }
+        }
+        best.map_or([127, 127, 127], |(_, c)| c)
+    }
+
     /// Class and display name of an element (level text, type name, family name).
     fn named(&mut self, id: i64) -> Option<(String, String)> {
         if id < 0 {

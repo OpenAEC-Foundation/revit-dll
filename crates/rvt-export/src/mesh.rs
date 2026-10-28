@@ -1154,6 +1154,9 @@ fn saved_plan(sg: &rvt_read::SavedGraphics, cands: &[SavedCand]) -> std::collect
 /// own symbol cache) and joined in element order.
 fn saved_batches(doc: &Document, cands: Vec<SavedCand>, hidden: &std::collections::HashSet<i64>) -> BTreeMap<&'static str, Batch> {
     let Some(sg) = doc.saved_graphics() else { return BTreeMap::new() };
+    // faces without a material (none on the face, none on its node styles, none on the category):
+    // Revit's default material, not the batch's category colour (step 2317)
+    let no_material = crate::props::Props::default_rgb(doc);
     let n = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8);
     let chunk = cands.len().div_ceil(n).max(1);
     let parts: Vec<BTreeMap<&'static str, Batch>> = std::thread::scope(|sc| {
@@ -1174,8 +1177,9 @@ fn saved_batches(doc: &Document, cands: Vec<SavedCand>, hidden: &std::collection
                                 let a: f64 = t.tris.iter().map(|t| norm(cross(sub(t[1], t[0]), sub(t[2], t[0]))) / 2.0).sum();
                                 eprintln!("saved element {} {} {:.2} ft2", c.id, c.name, a);
                             }
-                            // the material colour per triangle, else the category colour (step 2311)
-                            let base = c.color.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
+                            // the material colour per triangle, else Revit's default material
+                            // (step 2311, 2317)
+                            let base = no_material;
                             let first = b.indices.len() as u32;
                             for (tri, &m) in t.tris.iter().zip(&t.mats) {
                                 let before = b.positions.len();

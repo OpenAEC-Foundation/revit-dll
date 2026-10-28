@@ -262,7 +262,8 @@ impl<'a> SavedMesher<'a> {
                     hi[k] = hi[k].max(p[k]);
                 }
             }
-            eprintln!("{:indent$}= {name} #{i}: {} triangles box {lo:.2?} {hi:.2?}", "", out.len() - before, indent = 2 * depth);
+            let area: f64 = out.tris[before..].iter().map(|t| tri_area(t)).sum();
+            eprintln!("{:indent$}= {name} #{i}: {} triangles {area:.2} ft² box {lo:.2?} {hi:.2?}", "", out.len() - before, indent = 2 * depth);
         }
     }
 
@@ -310,6 +311,12 @@ fn visibility(flags: u64) -> u8 {
     } else {
         2
     }
+}
+
+fn tri_area(t: &[P3; 3]) -> f64 {
+    let (u, v) = (std::array::from_fn::<f64, 3, _>(|k| t[1][k] - t[0][k]), std::array::from_fn::<f64, 3, _>(|k| t[2][k] - t[0][k]));
+    let c = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+    (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt() / 2.0
 }
 
 fn element_id(v: &Value) -> Option<i64> {
