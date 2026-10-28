@@ -90,6 +90,8 @@ pub struct SavedGraphics {
     /// Graphics style (`GStyleElem`, channel 102) → its category id; `GInfo::m_categoryId` of a
     /// saved-graphics node names a style (step 2304: light sources are style 102861 → −2001121).
     pub styles: HashMap<u64, i64>,
+    /// Graphics style → its material (`GStyle::m_materialElemId`, when set; step 2311).
+    pub style_material: HashMap<u64, i64>,
     /// Channel-102 object records of the classes the saved graphics do not cover (rebar: no
     /// channel-103 record, step 2305), by element id.
     pub objects: HashMap<u64, Vec<u8>>,
@@ -146,6 +148,7 @@ impl Document {
                 let schema = rvt_core::Schema::read(cfb).ok()?;
                 let recs = rvt_core::records::file_channel(cfb, &schema, 103).ok()?;
                 let mut styles = HashMap::new();
+                let mut style_material = HashMap::new();
                 let mut objects = HashMap::new();
                 let mut demolished = HashSet::new();
                 let keep: Vec<u16> = OBJECT_CLASSES.iter().filter_map(|c| schema.tag(c)).collect();
@@ -164,16 +167,17 @@ impl Document {
                         if root != Some(tag) {
                             continue;
                         }
-                        let cat = rvt_core::graph::Graph::decode(&schema, &r.body).ok().and_then(|g| {
-                            let v = g.objects.first()?.get("m_categoryId")?.element_id();
-                            v
-                        });
+                        let graph = rvt_core::graph::Graph::decode(&schema, &r.body).ok();
+                        let cat = graph.as_ref().and_then(|g| g.objects.first()?.get("m_categoryId")?.element_id());
+                        if let Some(m) = graph.as_ref().and_then(|g| g.objects.iter().find_map(|o| o.get("m_materialElemId")?.element_id())).filter(|m| *m != -1) {
+                            style_material.insert(id, m);
+                        }
                         if let Some(c) = cat {
                             styles.insert(id, c);
                         }
                     }
                 }
-                Some(SavedGraphics { schema, bodies: recs.into_iter().map(|(k, r)| (k, r.body)).collect(), styles, objects, demolished })
+                Some(SavedGraphics { schema, bodies: recs.into_iter().map(|(k, r)| (k, r.body)).collect(), styles, style_material, objects, demolished })
             })
             .as_ref()
     }

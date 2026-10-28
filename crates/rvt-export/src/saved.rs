@@ -59,9 +59,30 @@ impl Xf {
 }
 
 /// Saved-graphics triangles per element, with a cache of symbols in their own coordinates.
+/// Triangles with the material of each (step 2311): the face's own material (`Face::m_renderStyleId`)
+/// or else the one of the nearest node style (`GInfo::m_categoryId` → `GStyle::m_materialElemId`);
+/// −1 when none (the viewer then keeps the category colour).
+#[derive(Debug, Clone, Default)]
+pub struct Tris {
+    pub tris: Vec<[P3; 3]>,
+    pub mats: Vec<i64>,
+}
+
+impl Tris {
+    fn len(&self) -> usize {
+        self.tris.len()
+    }
+    fn extend(&mut self, it: impl Iterator<Item = [P3; 3]>, mat: i64) {
+        for t in it {
+            self.tris.push(t);
+            self.mats.push(mat);
+        }
+    }
+}
+
 pub struct SavedMesher<'a> {
     sg: &'a SavedGraphics,
-    symbols: HashMap<u64, Option<std::rc::Rc<Vec<[P3; 3]>>>>,
+    symbols: HashMap<u64, Option<std::rc::Rc<Tris>>>,
     /// statistics: faces drawn / faces skipped (unsupported surface or loop)
     pub faces: usize,
     pub skipped: usize,
@@ -76,10 +97,15 @@ impl<'a> SavedMesher<'a> {
 
     /// World triangles of an element (feet), none when it has no saved graphics.
     pub fn element(&mut self, id: u64) -> Option<Vec<[P3; 3]>> {
+        self.element_mats(id).map(|t| t.tris)
+    }
+
+    /// World triangles of an element with the material id of each.
+    pub fn element_mats(&mut self, id: u64) -> Option<Tris> {
         let g = self.graph(id)?;
-        let mut out = Vec::new();
-        self.visit(&g, 0, Xf::ID, &mut out, 0);
-        (!out.is_empty()).then_some(out)
+        let mut out = Tris::default();
+        self.visit(&g, 0, Xf::ID, &mut out, 0, -1);
+        (!out.tris.is_empty()).then_some(out)
     }
 
     fn graph(&mut self, id: u64) -> Option<Graph> {
@@ -91,14 +117,14 @@ impl<'a> SavedMesher<'a> {
         (g.class_name(&self.sg.schema, 0) == Some("GElement")).then_some(g)
     }
 
-    fn symbol(&mut self, id: u64) -> Option<std::rc::Rc<Vec<[P3; 3]>>> {
+    fn symbol(&mut self, id: u64) -> Option<std::rc::Rc<Tris>> {
         if let Some(c) = self.symbols.get(&id) {
             return c.clone();
         }
         self.symbols.insert(id, None); // guards against cycles
         let r = self.graph(id).map(|g| {
-            let mut out = Vec::new();
-            self.visit(&g, 0, Xf::ID, &mut out, 1);
+            let mut out = Tris::default();
+            self.visit(&g, 0, Xf::ID, &mut out, 1, -1);
             std::rc::Rc::new(out)
         });
         self.symbols.insert(id, r.clone());
@@ -109,12 +135,17 @@ impl<'a> SavedMesher<'a> {
         self.sg.schema.class(o.class).map_or("", |c| c.name.as_str())
     }
 
-    fn visit(&mut self, g: &Graph, i: usize, xf: Xf, out: &mut Vec<[P3; 3]>, depth: usize) {
+    fn visit(&mut self, g: &Graph, i: usize, xf: Xf, out: &mut Tris, depth: usize, mat: i64) {
         if depth > 32 {
             return;
         }
         let Some(o) = g.objects.get(i) else { return };
+        let mut mat = mat;
         if let Some(gi) = o.get("m_GInfo").and_then(|v| v.as_obj()) {
+            // the material of the node's style (subcategory or category) applies below it
+            if let Some(m) = gi.get("m_categoryId").and_then(element_id).and_then(|st| self.sg.style_material.get(&(st as u64))) {
+                mat = *m;
+            }
             if let Some(flags) = gi.get("m_flags").and_then(|v| v.as_i64()) {
                 if matches!(visibility(flags as u64), 1 | 3) {
                     return;
@@ -149,7 +180,7 @@ impl<'a> SavedMesher<'a> {
         }
         if let Some(children) = o.get("m_subNodes").and_then(|v| v.as_list()) {
             for c in children.iter().filter_map(|v| v.as_ptr()) {
-                self.visit(g, c, xf, out, depth + 1);
+                self.visit(g, c, xf, out, depth + 1, mat);
             }
         }
         match name.as_str() {
@@ -159,10 +190,14 @@ impl<'a> SavedMesher<'a> {
                 let Some(local) = read_trf(trf) else { return };
                 let xf2 = xf.then(&local);
                 if let Some(e) = o.get("m_oEmbeddedSymbolGRep").and_then(|v| v.as_ptr()) {
-                    self.visit(g, e, xf2, out, depth + 1);
+                    self.visit(g, e, xf2, out, depth + 1, mat);
                 } else if let Some(sym) = info.get("m_symbolId").and_then(element_id) {
-                    if let Some(tris) = self.symbol(sym as u64) {
-                        out.extend(tris.iter().map(|t| t.map(|p| xf2.apply(p))));
+                    if let Some(st) = self.symbol(sym as u64) {
+                        // the symbol's triangles without a material take the instance's
+                        for (t, m) in st.tris.iter().zip(&st.mats) {
+                            out.tris.push(t.map(|p| xf2.apply(p)));
+                            out.mats.push(if *m == -1 { mat } else { *m });
+                        }
                     }
                 }
             }
@@ -182,10 +217,15 @@ impl<'a> SavedMesher<'a> {
                             Some(tris) => {
                                 self.faces += 1;
                                 let flip = xf.det() < 0.0;
-                                out.extend(tris.into_iter().map(|t| {
-                                    let w = t.map(|p| xf.apply(p));
-                                    if flip { [w[0], w[2], w[1]] } else { w }
-                                }));
+                                // the face's own material, else the inherited one
+                                let fm = g.objects[f].get("m_renderStyleId").and_then(element_id).filter(|m| *m != -1).unwrap_or(mat);
+                                out.extend(
+                                    tris.into_iter().map(|t| {
+                                        let w = t.map(|p| xf.apply(p));
+                                        if flip { [w[0], w[2], w[1]] } else { w }
+                                    }),
+                                    fm,
+                                );
                             }
                             None => self.skipped += 1,
                         }
@@ -194,14 +234,14 @@ impl<'a> SavedMesher<'a> {
             }
             "GPolyMesh" => {
                 if let Some(tris) = polymesh(g, o) {
-                    out.extend(tris.into_iter().map(|t| t.map(|p| xf.apply(p))));
+                    out.extend(tris.into_iter().map(|t| t.map(|p| xf.apply(p))), mat);
                 }
             }
             _ => {}
         }
         if tree && out.len() > before {
             let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
-            for p in out[before..].iter().flatten() {
+            for p in out.tris[before..].iter().flatten() {
                 for k in 0..3 {
                     lo[k] = lo[k].min(p[k]);
                     hi[k] = hi[k].max(p[k]);

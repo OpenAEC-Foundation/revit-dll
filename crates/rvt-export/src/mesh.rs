@@ -23,6 +23,11 @@ pub struct Batch {
     /// Elements drawn in this batch (step 2309; saved-graphics batches only): element id, first
     /// index and index count in `indices`.
     pub elements: Vec<(u64, u32, u32)>,
+    /// Per-vertex colour RGBA (step 2311; saved-graphics batches: the material colour, alpha from
+    /// its transparency); empty when the batch has one colour.
+    pub colors: Vec<u8>,
+    /// Properties of the batch's elements (id, JSON object; step 2311).
+    pub props: Vec<(u64, String)>,
 }
 
 /// All batches plus bounds (view coordinates).
@@ -1153,21 +1158,42 @@ fn saved_batches(doc: &Document, cands: Vec<SavedCand>) -> BTreeMap<&'static str
             .map(|part| {
                 sc.spawn(move || {
                     let mut mesher = crate::saved::SavedMesher::new(sg);
+                    let mut props = crate::props::Props::new(doc);
                     let mut saved: BTreeMap<&'static str, Batch> = BTreeMap::new();
                     for c in part {
                         let b = saved.entry(c.name).or_insert_with(|| Batch::new(c.name, c.color));
-                        if let Some(tris) = mesher.element(c.id).or_else(|| crate::rebar::element(sg, c.id)) {
+                        let found = mesher.element_mats(c.id).or_else(|| {
+                            crate::rebar::element(sg, c.id).map(|tris| crate::saved::Tris { mats: vec![-1; tris.len()], tris })
+                        });
+                        if let Some(t) = found {
                             if std::env::var_os("RVT_MESH_SAVED_IDS").is_some() {
-                                let a: f64 = tris.iter().map(|t| norm(cross(sub(t[1], t[0]), sub(t[2], t[0]))) / 2.0).sum();
+                                let a: f64 = t.tris.iter().map(|t| norm(cross(sub(t[1], t[0]), sub(t[2], t[0]))) / 2.0).sum();
                                 eprintln!("saved element {} {} {:.2} ft2", c.id, c.name, a);
                             }
+                            // the material colour per triangle, else the category colour (step 2311)
+                            let base = c.color.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
                             let first = b.indices.len() as u32;
-                            for t in tris {
-                                b.tri(t[0], t[1], t[2]);
+                            for (tri, &m) in t.tris.iter().zip(&t.mats) {
+                                let before = b.positions.len();
+                                b.tri(tri[0], tri[1], tri[2]);
+                                if b.positions.len() > before {
+                                    let rgba = match props.material(m) {
+                                        Some(info) => {
+                                            let a = ((1.0 - info.transparency.clamp(0.0, 1.0)) * 255.0).round() as u8;
+                                            [info.rgb[0], info.rgb[1], info.rgb[2], a]
+                                        }
+                                        None => [base[0], base[1], base[2], 255],
+                                    };
+                                    for _ in 0..3 {
+                                        b.colors.extend_from_slice(&rgba);
+                                    }
+                                }
                             }
                             let count = b.indices.len() as u32 - first;
                             if count > 0 {
                                 b.elements.push((c.id, first, count));
+                                let json = props.element_json(c.id, c.name, &t.mats);
+                                b.props.push((c.id, json));
                             }
                         }
                     }
@@ -1188,6 +1214,8 @@ fn saved_batches(doc: &Document, cands: Vec<SavedCand>) -> BTreeMap<&'static str
                     acc.normals.extend_from_slice(&b.normals);
                     acc.indices.extend(b.indices.iter().map(|i| i + base));
                     acc.elements.extend(b.elements.iter().map(|&(id, f, n)| (id, f + first, n)));
+                    acc.colors.extend_from_slice(&b.colors);
+                    acc.props.extend(b.props);
                 }
                 None => {
                     saved.insert(name, b);
@@ -3701,6 +3729,25 @@ pub fn encode(scene: &Scene) -> Vec<u8> {
             b.extend_from_slice(&first.to_le_bytes());
             b.extend_from_slice(&count.to_le_bytes());
         }
+    }
+    // "VCOL": per batch u32 flag; with 1, RGBA u8 per vertex (step 2311)
+    b.extend_from_slice(b"VCOL");
+    for x in &scene.batches {
+        let full = !x.colors.is_empty() && x.colors.len() == x.positions.len() / 3 * 4;
+        b.extend_from_slice(&(full as u32).to_le_bytes());
+        if full {
+            b.extend_from_slice(&x.colors);
+        }
+    }
+    // "PROP": u32 count; per element u64 id, u32 length, JSON (UTF-8, padded to 4)
+    b.extend_from_slice(b"PROP");
+    let props: Vec<&(u64, String)> = scene.batches.iter().flat_map(|x| x.props.iter()).collect();
+    b.extend_from_slice(&(props.len() as u32).to_le_bytes());
+    for (id, json) in props {
+        b.extend_from_slice(&id.to_le_bytes());
+        b.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        b.extend_from_slice(json.as_bytes());
+        b.resize(b.len() + (4 - json.len() % 4) % 4, 0);
     }
     b.extend_from_slice(b"LVLS");
     b.extend_from_slice(&(scene.levels.len() as u32).to_le_bytes());
