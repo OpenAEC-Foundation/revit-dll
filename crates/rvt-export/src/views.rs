@@ -194,6 +194,31 @@ pub fn all_views(doc: &Document) -> Vec<ViewInfo> {
     collect(doc, false)
 }
 
+/// The categories and subcategories the project's default 3D view ("{3D}") hides (Visibility/
+/// Graphics), from its draw filter `IckyExcludedCategoriesSetPtrWrapper::m_categoryIds`
+/// (open-research step 2315). 3077 R26: 68 ids (rebar, planting, entourage, parking, light
+/// source, MEP insulation and lining, ...); rac basic 2026 70, snowdon arch 2025 51 (none of them
+/// in Revit's {3D} geometry, every category of that geometry absent from the list). Empty when
+/// the file has no such view or no object records.
+pub fn default_3d_hidden_categories(doc: &Document) -> std::collections::HashSet<i64> {
+    let mut out = std::collections::HashSet::new();
+    for id in doc.object_ids_of_class("DBView3d") {
+        let Some(o) = doc.object(id) else { continue };
+        if o.get("m_viewName").and_then(|v| v.as_str()) != Some("{3D}") || boolean(o.get("m_isTemplate")) == Some(true) {
+            continue;
+        }
+        for f in o.get("m_oaDrawFilters").and_then(|v| v.as_list()).unwrap_or(&[]) {
+            let Some(df) = o.deref(f) else { continue };
+            if !df.class.starts_with("IckyExcludedCategories") {
+                continue;
+            }
+            out.extend(df.get("m_categoryIds").and_then(|v| v.as_list()).unwrap_or(&[]).iter().filter_map(|c| c.element()));
+        }
+        break;
+    }
+    out
+}
+
 /// Classes that never hold a model view (skipped without decoding when `model_only`).
 const NON_MODEL_CLASSES: &[&str] =
     &["DBViewDrafting", "DBViewAnonDrafting", "DBViewLegend", "DBViewSchedule", "DBViewProject", "RbsDbViewSystemNavigator", "DBViewRendering"];

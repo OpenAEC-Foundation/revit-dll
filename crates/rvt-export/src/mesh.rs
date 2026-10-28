@@ -1095,11 +1095,13 @@ struct SavedCand {
     name: &'static str,
     color: [f32; 3],
     counted: bool,
+    /// its category is hidden in the default 3D view (step 2315)
+    hidden: bool,
 }
 
 /// The elements drawn from saved graphics. `skip`: elements not drawn themselves (group
 /// definition copies, demolished, secondary options, curtain walls, in-place family members).
-fn saved_candidates(doc: &Document, sg: &rvt_read::SavedGraphics, skip: &std::collections::HashSet<u64>) -> Vec<SavedCand> {
+fn saved_candidates(doc: &Document, sg: &rvt_read::SavedGraphics, skip: &std::collections::HashSet<u64>, hidden: &std::collections::HashSet<i64>) -> Vec<SavedCand> {
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for e in doc.elements() {
@@ -1116,7 +1118,9 @@ fn saved_candidates(doc: &Document, sg: &rvt_read::SavedGraphics, skip: &std::co
         if is_type || (name == "Other family instances" && class != "FamilyInstance") || class.starts_with("Analytical") || matches!(class, "RoomElem" | "ElementGroup") {
             continue;
         }
-        out.push(SavedCand { id: e.id, name, color, counted });
+        // step 2315: an element of a category the default 3D view hides is not drawn, but it lets
+        // its batch be replaced (the readers would draw it otherwise)
+        out.push(SavedCand { id: e.id, name, color, counted, hidden: hidden.contains(&(e.category as i64)) });
     }
     out
 }
@@ -1129,7 +1133,7 @@ fn saved_plan(sg: &rvt_read::SavedGraphics, cands: &[SavedCand]) -> std::collect
     let mut by: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
     for c in cands {
         let e = by.entry(c.name).or_default();
-        if sg.bodies.contains_key(&c.id) || sg.objects.contains_key(&c.id) {
+        if c.hidden || sg.bodies.contains_key(&c.id) || sg.objects.contains_key(&c.id) {
             e.0 += 1;
         } else if c.counted {
             e.1 += 1;
@@ -1148,7 +1152,7 @@ fn saved_plan(sg: &rvt_read::SavedGraphics, cands: &[SavedCand]) -> std::collect
 
 /// Batches from saved graphics (and rebar from channel 102), meshed on several threads (each its
 /// own symbol cache) and joined in element order.
-fn saved_batches(doc: &Document, cands: Vec<SavedCand>) -> BTreeMap<&'static str, Batch> {
+fn saved_batches(doc: &Document, cands: Vec<SavedCand>, hidden: &std::collections::HashSet<i64>) -> BTreeMap<&'static str, Batch> {
     let Some(sg) = doc.saved_graphics() else { return BTreeMap::new() };
     let n = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8);
     let chunk = cands.len().div_ceil(n).max(1);
@@ -1157,10 +1161,10 @@ fn saved_batches(doc: &Document, cands: Vec<SavedCand>) -> BTreeMap<&'static str
             .chunks(chunk)
             .map(|part| {
                 sc.spawn(move || {
-                    let mut mesher = crate::saved::SavedMesher::new(sg);
+                    let mut mesher = crate::saved::SavedMesher::new(sg).with_hidden(hidden.clone());
                     let mut props = crate::props::Props::new(doc);
                     let mut saved: BTreeMap<&'static str, Batch> = BTreeMap::new();
-                    for c in part {
+                    for c in part.iter().filter(|c| !c.hidden) {
                         let b = saved.entry(c.name).or_insert_with(|| Batch::new(c.name, c.color));
                         let found = mesher.element_mats(c.id).or_else(|| {
                             crate::rebar::element(sg, c.id).map(|tris| crate::saved::Tris { mats: vec![-1; tris.len()], tris })
@@ -1252,9 +1256,10 @@ fn saved_batch(cat: i32) -> Option<(&'static str, [f32; 3], bool)> {
         -2000035 => ("Roofs", [0.60, 0.30, 0.18], true),
         -2001392 => ("Slab edges", [0.62, 0.60, 0.56], true),
         -2000120 => ("Stairs", [0.70, 0.66, 0.60], true),
-        // runs, landings and supports (stringers, carriages) have their own saved graphics: the
-        // stair's record does not hold them (snowdon arch 2025: 885 m² of 60 runs/landings and
-        // 170 supports missing against Revit's {3D} view)
+        // runs, landings and supports (stringers, carriages) have saved graphics of their own; a
+        // stair normally draws them as the symbols of its instances (Revit's per-element geometry
+        // lists them under the stair and again on their own), so only those no stair draws are
+        // drawn here (step 2312b, see `scene_in`)
         -2000919 | -2000920 | -2000123 => ("Stairs", [0.70, 0.66, 0.60], false),
         -2000126 | -2000946 | -2000947 | -2000948 => ("Railings", [0.45, 0.47, 0.50], true),
         // step 2310: Toposolid (Revit 2024+ terrain, 3077 R26: its terrain was not drawn) with the
@@ -1277,6 +1282,28 @@ fn saved_batch(cat: i32) -> Option<(&'static str, [f32; 3], bool)> {
             (name, color, name != "Other family instances")
         }
     })
+}
+
+/// Shared nested family instances (`FamilyInstance::m_superInstanceId` set) that are not in their
+/// super instance's `m_subInstTable` any more: stale records with saved graphics of their own
+/// (open-research step 2316; Storax lamellengevels 11121102.., super instance 11121101 lists
+/// 11294319.. instead, which are in Revit's view).
+fn orphan_subinstances(doc: &Document) -> Vec<u64> {
+    let mut tables: std::collections::HashMap<i64, Option<std::collections::HashSet<i64>>> = Default::default();
+    let mut out = Vec::new();
+    for id in doc.object_ids_of_class("FamilyInstance") {
+        let Some(o) = doc.object_root(id) else { continue };
+        let Some(sup) = o.get("m_superInstanceId").and_then(|v| v.element()).filter(|s| *s >= 0) else { continue };
+        let table = tables.entry(sup).or_insert_with(|| {
+            let p = doc.object_root(sup as u64)?;
+            let list = p.get("m_subInstTable")?.as_list()?;
+            Some(list.iter().filter_map(|x| x.as_object()?.get("first")?.element()).collect())
+        });
+        if table.as_ref().is_some_and(|t| !t.contains(&(id as i64))) {
+            out.push(id);
+        }
+    }
+    out
 }
 
 /// Roofs whose type is a curtain roof type (sloped glazing): drawn by their panels and mullions.
@@ -1354,12 +1381,26 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
         // so are sloped-glazing roofs (type class CurtainRoofAttributes): their own record holds a
         // slab Revit does not draw (rac advanced 2019: 3 roofs, 242 m² over the glass panels)
         skip.extend(curtain_roofs(doc));
+        // shared nested instances their super instance no longer lists (Storax lamellengevels: 84
+        // lamellas, 35 m², that Revit's element collector does not have)
+        skip.extend(orphan_subinstances(doc));
         // members of in-place families are drawn by the family instance (racbasic 2026: walls
         // 628450–628456, 4000 ft² not in Revit's view)
         skip.extend(doc.inplace_ids());
-        let cands = saved_candidates(doc, sg, &skip);
+        let hidden = crate::views::default_3d_hidden_categories(doc);
+        let mut cands = saved_candidates(doc, sg, &skip, &hidden);
+        // step 2312b: stair runs, landings and supports a stair's record already draws (3077 R26:
+        // as symbols of its instances; snowdon arch 2025, rac basic 2026: not) are not drawn twice
+        let in_stairs: std::collections::HashSet<u64> = {
+            let mut m = crate::saved::SavedMesher::new(sg).with_hidden(hidden.clone());
+            for c in cands.iter().filter(|c| doc.element(c.id).is_some_and(|e| e.category == -2000120)) {
+                m.element_mats(c.id);
+            }
+            m.drawn_symbols
+        };
+        cands.retain(|c| !in_stairs.contains(&c.id));
         replaced = saved_plan(sg, &cands);
-        saved_job = Some(sc.spawn(move || saved_batches(doc, cands)));
+        saved_job = Some(sc.spawn(move || saved_batches(doc, cands, &hidden)));
     }
     let want = |name: &str| !replaced.contains(name);
     tick("saved plan");

@@ -88,11 +88,23 @@ pub struct SavedMesher<'a> {
     pub skipped: usize,
     /// statistics: time spent decoding records
     pub decode_time: std::time::Duration,
+    /// categories and subcategories the default 3D view hides (step 2315), besides
+    /// `HIDDEN_CATEGORIES`
+    hidden: std::collections::HashSet<i64>,
+    /// the symbols drawn through instances so far (step 2312b: a stair in 3077 R26 draws its runs
+    /// and supports as the symbols of its instances, one in snowdon arch 2025 does not)
+    pub drawn_symbols: std::collections::HashSet<u64>,
 }
 
 impl<'a> SavedMesher<'a> {
     pub fn new(sg: &'a SavedGraphics) -> Self {
-        SavedMesher { sg, symbols: HashMap::new(), faces: 0, skipped: 0, decode_time: Default::default() }
+        SavedMesher { sg, symbols: HashMap::new(), faces: 0, skipped: 0, decode_time: Default::default(), hidden: Default::default(), drawn_symbols: Default::default() }
+    }
+
+    /// Also skips nodes of these categories/subcategories (the default 3D view's hidden ones).
+    pub fn with_hidden(mut self, hidden: std::collections::HashSet<i64>) -> Self {
+        self.hidden = hidden;
+        self
     }
 
     /// World triangles of an element (feet), none when it has no saved graphics.
@@ -153,7 +165,7 @@ impl<'a> SavedMesher<'a> {
             }
             // subcategories a default 3D view hides
             let cat = gi.get("m_categoryId").and_then(element_id).and_then(|st| self.sg.styles.get(&(st as u64)));
-            if cat.is_some_and(|c| HIDDEN_CATEGORIES.contains(c)) {
+            if cat.is_some_and(|c| HIDDEN_CATEGORIES.contains(c) || self.hidden.contains(c)) {
                 return;
             }
         }
@@ -193,6 +205,9 @@ impl<'a> SavedMesher<'a> {
                     self.visit(g, e, xf2, out, depth + 1, mat);
                 } else if let Some(sym) = info.get("m_symbolId").and_then(element_id) {
                     if let Some(st) = self.symbol(sym as u64) {
+                        if !st.tris.is_empty() {
+                            self.drawn_symbols.insert(sym as u64);
+                        }
                         // the symbol's triangles without a material take the instance's
                         for (t, m) in st.tris.iter().zip(&st.mats) {
                             out.tris.push(t.map(|p| xf2.apply(p)));
