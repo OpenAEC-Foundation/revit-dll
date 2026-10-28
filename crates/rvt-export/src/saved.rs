@@ -219,6 +219,12 @@ impl<'a> SavedMesher<'a> {
             _ if s.is_a(o.class, "GBRep") => {
                 if let Some(faces) = o.get("m_pFaces").and_then(|v| v.as_list()) {
                     for f in faces.iter().filter_map(|v| v.as_ptr()) {
+                        // step 2318: a face's own GInfo flags hide it like a node's (rac advanced
+                        // 2019: stairs 1.23 and mullions 1.16 times Revit's area, both 1.00 now)
+                        let ff = g.objects[f].get("m_GInfo").and_then(|v| v.as_obj()).and_then(|gi| gi.get("m_flags")).and_then(|v| v.as_i64());
+                        if ff.is_some_and(|ff| matches!(visibility(ff as u64), 1 | 3)) {
+                            continue;
+                        }
                         let tris = face_triangles(s, g, f);
                         if env_flag(0) && tris.is_none() {
                             let fo = &g.objects[f];
