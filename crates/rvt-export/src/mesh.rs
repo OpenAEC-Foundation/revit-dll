@@ -1279,6 +1279,20 @@ fn saved_batch(cat: i32) -> Option<(&'static str, [f32; 3], bool)> {
     })
 }
 
+/// Roofs whose type is a curtain roof type (sloped glazing): drawn by their panels and mullions.
+fn curtain_roofs(doc: &Document) -> Vec<u64> {
+    let mut types: std::collections::HashMap<i64, bool> = Default::default();
+    let mut out = Vec::new();
+    for e in doc.elements_in_category(-2000035) {
+        let Some(t) = doc.object(e.id).and_then(|o| o.get("m_roofAttributesId").and_then(|v| v.element())) else { continue };
+        let curtain = *types.entry(t).or_insert_with(|| t >= 0 && doc.object(t as u64).is_some_and(|o| o.class == "CurtainRoofAttributes"));
+        if curtain {
+            out.push(e.id);
+        }
+    }
+    out
+}
+
 fn segment_batch(cat: Option<i32>) -> (&'static str, [f32; 3]) {
     match cat {
         Some(-2008000) => ("Ducts", [0.35, 0.60, 0.80]),
@@ -1337,6 +1351,9 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
         let mut skip = group_defs.clone();
         // walls without a compound type are drawn by their panels (step 2215)
         skip.extend(walls_all.iter().filter(|w| doc.type_thickness(w.wall_type).map_or(true, |t| t <= 0.0)).map(|w| w.id));
+        // so are sloped-glazing roofs (type class CurtainRoofAttributes): their own record holds a
+        // slab Revit does not draw (rac advanced 2019: 3 roofs, 242 m² over the glass panels)
+        skip.extend(curtain_roofs(doc));
         // members of in-place families are drawn by the family instance (racbasic 2026: walls
         // 628450–628456, 4000 ft² not in Revit's view)
         skip.extend(doc.inplace_ids());
