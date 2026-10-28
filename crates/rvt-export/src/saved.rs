@@ -542,8 +542,8 @@ fn face_triangles(s: &Schema, g: &Graph, fi: usize) -> Option<Vec<[P3; 3]>> {
                 let d = ks[i + 1] - ks[i];
                 (i, if d.abs() > 1e-12 { (x - ks[i]) / d } else { 0.0 }, d)
             };
-            // two subdivisions per knot interval
-            let step = |ks: &[f64]| ks.windows(2).map(|w| (w[1] - w[0]).abs()).filter(|d| *d > 1e-12).fold(f64::INFINITY, f64::min) / 2.0;
+            // two subdivisions per knot interval on average
+            let step = |ks: &[f64]| (ks[ks.len() - 1] - ks[0]).abs() / (2.0 * (ks.len() - 1) as f64);
             let (su, sv) = (step(&us), step(&vs));
             (
                 Box::new(move |uv: [f64; 2]| {
