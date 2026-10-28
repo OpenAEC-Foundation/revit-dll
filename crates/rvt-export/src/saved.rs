@@ -225,6 +225,13 @@ impl<'a> SavedMesher<'a> {
                         if ff.is_some_and(|ff| matches!(visibility(ff as u64), 1 | 3)) {
                             continue;
                         }
+                        // step 2319: and a face without flag 0x80000 is not drawn either (snowdon
+                        // facades 2026 columns: the core box 0x8204 inside the finished faces
+                        // 0x88204/0x88004, 2.12 -> 1.00 times Revit's area; rst basic 2026: 14
+                        // beam end pieces past the cut end)
+                        if ff.is_some_and(|ff| ff & 0x80000 == 0) {
+                            continue;
+                        }
                         let tris = face_triangles(s, g, f);
                         if env_flag(0) && tris.is_none() {
                             let fo = &g.objects[f];
@@ -237,6 +244,21 @@ impl<'a> SavedMesher<'a> {
                         match tris {
                             Some(tris) => {
                                 self.faces += 1;
+                                if env_flag(2) {
+                                    let fo = &g.objects[f];
+                                    let a: f64 = tris.iter().map(tri_area).sum();
+                                    let gi = fo.get("m_GInfo").and_then(|v| v.as_obj());
+                                    eprintln!(
+                                        "{:indent$}  face #{f}: {} triangles {a:.2} ft² flags {:#x} tag {:?} faceFlags {:?} material {:?}",
+                                        "",
+                                        tris.len(),
+                                        gi.and_then(|gi| gi.get("m_flags")).and_then(|v| v.as_i64()).unwrap_or(-1),
+                                        gi.and_then(|gi| gi.get("m_tag")).and_then(|v| v.as_i64()),
+                                        fo.get("m_faceFlags_v9").and_then(|v| v.as_i64()),
+                                        fo.get("m_renderStyleId").and_then(element_id),
+                                        indent = 2 * depth
+                                    );
+                                }
                                 let flip = xf.det() < 0.0;
                                 // the face's own material, else the inherited one
                                 let fm = g.objects[f].get("m_renderStyleId").and_then(element_id).filter(|m| *m != -1).unwrap_or(mat);
