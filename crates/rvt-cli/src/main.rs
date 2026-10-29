@@ -38,7 +38,8 @@ const USAGE: &str = "usage:
   rvt coverage <file.rvt>              decoded records per channel, top failing classes
   rvt views <file.rvt> [--all] [--json] model views, one line each (id, kind, name, camera,
                                        section box, level, cut); --all: templates, sheets, ...
-Each command except `views` prints JSON; add `-o out.json` to write a file instead, `--pretty` to indent.";
+  rvt schedules <file.rvt> [--json]    schedules: fields, filters, sorting and computed rows
+Each command except `views` and `schedules` prints JSON; add `-o out.json` to write a file instead, `--pretty` to indent.";
 
 /// The value after a `--name` option.
 fn opt<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
@@ -335,6 +336,10 @@ fn run(args: &[String]) -> Result<Value, String> {
             let list = if all { rvt_export::views::all_views(&doc) } else { rvt_export::views::views(&doc) };
             to(serde_json::to_value(json!({"views": list})))
         }
+        "schedules" => {
+            let doc = rvt_read::Document::open(path).map_err(err)?;
+            to(serde_json::to_value(json!({"schedules": rvt_export::schedules::schedules(&doc)})))
+        }
         "coverage" => {
             let doc = rvt_read::Document::open(path).map_err(err)?;
             to(serde_json::to_value(doc.object_coverage()))
@@ -386,8 +391,77 @@ fn views_text(doc: &rvt_read::Document, all: bool) -> String {
     out
 }
 
+/// `rvt schedules`: each schedule as a text table (visible columns), its filters and sorting.
+fn schedules_text(doc: &rvt_read::Document) -> String {
+    use rvt_export::schedules::{FieldSource, ScheduleKind};
+    let list = rvt_export::schedules::schedules(doc);
+    let mut out = String::new();
+    for s in &list {
+        out += &format!("== {} \"{}\"  category {}", s.id, s.name, s.category);
+        if s.is_template {
+            out += "  template";
+        }
+        if s.kind != ScheduleKind::Elements {
+            out += &format!("  {:?}", s.kind);
+        }
+        if !s.itemize {
+            out += "  not itemized";
+        }
+        out.push('\n');
+        let heading = |f: i64| s.columns.iter().find(|c| c.field == f).map_or(format!("#{f}"), |c| c.heading.clone());
+        for f in &s.filters {
+            out += &format!("   filter: {} {:?} {:?}\n", heading(f.field), f.op, f.value);
+        }
+        for k in &s.sort {
+            out += &format!("   sort: {}{}\n", heading(k.field), if k.descending { " descending" } else { "" });
+        }
+        let cols: Vec<usize> = (0..s.columns.len()).filter(|&i| !s.columns[i].hidden).collect();
+        let mut table: Vec<Vec<String>> = vec![cols
+            .iter()
+            .map(|&i| {
+                let c = &s.columns[i];
+                match c.source {
+                    FieldSource::Instance | FieldSource::Count => c.heading.clone(),
+                    src => format!("{} ({src:?})", c.heading),
+                }
+            })
+            .collect()];
+        for r in &s.rows {
+            table.push(cols.iter().map(|&i| r.cells[i].clone().unwrap_or_else(|| "?".into())).collect());
+        }
+        let widths: Vec<usize> = (0..cols.len()).map(|j| table.iter().map(|r| r[j].chars().count()).max().unwrap_or(0).min(40)).collect();
+        for r in &table {
+            let cells: Vec<String> = r.iter().zip(&widths).map(|(c, &w)| format!("{:<w$}", c.chars().take(40).collect::<String>())).collect();
+            out += &format!("   | {} |\n", cells.join(" | "));
+        }
+        if s.computed {
+            out += &format!("   {} rows, {} cells without a value\n", s.rows.len(), s.unresolved);
+        } else {
+            out += "   rows not computed\n";
+        }
+    }
+    out += &format!("{} schedules\n", list.len());
+    out
+}
+
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("schedules") && !args.iter().any(|a| a == "--json") {
+        let Some(path) = args.get(1) else {
+            eprintln!("{USAGE}");
+            return ExitCode::from(2);
+        };
+        return match rvt_read::Document::open(path) {
+            Ok(doc) => {
+                print!("{}", schedules_text(&doc));
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("{path}: {e}");
+                ExitCode::from(2)
+            }
+        };
+    }
     if args.first().map(String::as_str) == Some("views") && !args.iter().any(|a| a == "--json") {
         let Some(path) = args.get(1) else {
             eprintln!("{USAGE}");

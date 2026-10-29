@@ -5,4 +5,5 @@ pub mod mesh;
 pub mod props;
 pub mod rebar;
 pub mod saved;
+pub mod schedules;
 pub mod views;

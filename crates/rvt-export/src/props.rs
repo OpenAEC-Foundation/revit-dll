@@ -157,7 +157,7 @@ impl<'a> Props<'a> {
 }
 
 /// The name Revit shows for a system family, from its type class (others as the class itself).
-fn system_family(class: &str) -> String {
+pub(crate) fn system_family(class: &str) -> String {
     match class {
         "BasicWallType" => "Basic Wall",
         "CurtainWallType" | "NewCurtainWallType" => "Curtain Wall",
