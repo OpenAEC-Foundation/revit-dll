@@ -199,9 +199,10 @@ pub struct SortField {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Row {
-    /// The element of an itemized row; `None` for a group or the grand total.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub element: Option<u64>,
+    /// The elements of the row: one when itemized, the group's otherwise; none for the grand
+    /// total.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub elements: Vec<u64>,
     /// Elements in the row (1 when itemized).
     pub count: usize,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -376,16 +377,22 @@ fn compute(cx: &mut Context, s: &mut Schedule) {
 
     let total = items.len();
     if s.itemize {
-        s.rows = items.iter().map(|(id, v)| Row { element: Some(*id), count: 1, total: false, cells: cells(cx, s, v, 1) }).collect();
+        s.rows = items.iter().map(|(id, v)| Row { elements: vec![*id], count: 1, total: false, cells: cells(cx, s, v, 1) }).collect();
     } else {
-        let mut groups: Vec<Vec<&Vec<Option<Val>>>> = Vec::new();
-        for (_, v) in &items {
+        let mut groups: Vec<(Vec<u64>, Vec<&Vec<Option<Val>>>)> = Vec::new();
+        for (id, v) in &items {
             match groups.last_mut() {
-                Some(g) if order(g[0], v, cx) == Ordering::Equal => g.push(v),
-                _ => groups.push(vec![v]),
+                Some((ids, g)) if order(g[0], v, cx) == Ordering::Equal => {
+                    ids.push(*id);
+                    g.push(v);
+                }
+                _ => groups.push((vec![*id], vec![v])),
             }
         }
-        s.rows = groups.iter().map(|g| Row { element: None, count: g.len(), total: false, cells: merged(cx, s, g) }).collect();
+        s.rows = groups
+            .into_iter()
+            .map(|(elements, g)| Row { count: g.len(), total: false, cells: merged(cx, s, &g), elements })
+            .collect();
     }
     if s.grand_total {
         let all: Vec<&Vec<Option<Val>>> = items.iter().map(|(_, v)| v).collect();
@@ -412,7 +419,7 @@ fn compute(cx: &mut Context, s: &mut Schedule) {
         if let (Some(label), Some(first)) = (label, s.columns.iter().position(|c| !c.hidden)) {
             cells[first] = Some(label);
         }
-        s.rows.push(Row { element: None, count: total, total: true, cells });
+        s.rows.push(Row { elements: Vec::new(), count: total, total: true, cells });
     }
 }
 
