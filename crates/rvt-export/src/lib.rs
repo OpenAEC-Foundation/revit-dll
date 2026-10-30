@@ -6,4 +6,5 @@ pub mod props;
 pub mod rebar;
 pub mod saved;
 pub mod schedules;
+pub mod sheets;
 pub mod views;

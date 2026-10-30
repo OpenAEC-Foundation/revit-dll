@@ -39,6 +39,7 @@ const USAGE: &str = "usage:
   rvt views <file.rvt> [--all] [--json] model views, one line each (id, kind, name, camera,
                                        section box, level, cut); --all: templates, sheets, ...
   rvt schedules <file.rvt> [--json]    schedules: fields, filters, sorting and computed rows
+  rvt sheets <file.rvt>                sheets: number, name, title block, placed views (beta)
 Each command except `views` and `schedules` prints JSON; add `-o out.json` to write a file instead, `--pretty` to indent.";
 
 /// The value after a `--name` option.
@@ -339,6 +340,10 @@ fn run(args: &[String]) -> Result<Value, String> {
         "schedules" => {
             let doc = rvt_read::Document::open(path).map_err(err)?;
             to(serde_json::to_value(json!({"schedules": rvt_export::schedules::schedules(&doc)})))
+        }
+        "sheets" => {
+            let doc = rvt_read::Document::open(path).map_err(err)?;
+            to(serde_json::to_value(json!({"sheets": rvt_export::sheets::sheets(&doc)})))
         }
         "coverage" => {
             let doc = rvt_read::Document::open(path).map_err(err)?;
