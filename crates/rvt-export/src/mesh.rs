@@ -2640,6 +2640,21 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
             ((st, ix), (b, r))
         })
         .collect();
+    // Family chains whose forms are all voids (each marked void, none unknown): the family only
+    // cuts its host and has nothing of its own to draw, so it gets no box (open-3d-viewer issue
+    // #24: a void family cutting the terrain was drawn as a solid grey block)
+    let void_only_chains: std::collections::HashSet<(String, usize)> = {
+        let flags = chain_solids
+            .iter()
+            .flat_map(|(k, v)| v.iter().map(move |s| (k, s.void)))
+            .chain(chain_sweeps.iter().flat_map(|(k, v)| v.iter().map(move |s| (k, s.void))))
+            .chain(chain_blrev.iter().flat_map(|(k, (b, r))| b.iter().map(|s| s.void).chain(r.iter().map(|s| s.void)).map(move |v| (k, v))));
+        let mut all_void: std::collections::HashMap<&(String, usize), bool> = std::collections::HashMap::new();
+        for (k, void) in flags {
+            *all_void.entry(k).or_insert(true) &= void == Some(true);
+        }
+        all_void.into_iter().filter(|(_, v)| *v).map(|(k, _)| k.clone()).collect()
+    };
     // Step 2268: a form whose Visible is bound to a yes/no family parameter (S2268) is hidden when
     // that parameter is 0 for the type: the symbol's value (matched by parameter name), else the
     // family's current value (snowdon door family 439: 'Masonry Frame' 1 / 'Dry Wall Frame' 0,
@@ -3582,11 +3597,15 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
         // because its box also spans that content; its forms are placed as they are, unfitted.
         // step 2296: a wall-based family without readable forms (snowdon structural 2026
         // 'GM_OpeningWall_*', 91 generic models: voids cutting their wall, no geometry in Revit's
-        // view; we drew 633 m² of boxes) gets no box; doors and windows keep their wall-band box
+        // view; we drew 633 m² of boxes) gets no box; doors and windows keep their wall-band box.
+        // The same for any family whose forms are all voids, however it is hosted (issue #24).
         let no_forms = i.symbol.and_then(|s| shape_cache.get(&s)).is_none_or(|c| c.is_empty());
         if no_forms
             && !matches!(i.cat, -2000023 | -2000014)
-            && i.symbol.and_then(|s| symbol_family.get(&s)).and_then(|f| family_chain.get(f)).is_some_and(|k| wall_based_chains.contains(k))
+            && i.symbol
+                .and_then(|s| symbol_family.get(&s))
+                .and_then(|f| family_chain.get(f))
+                .is_some_and(|k| wall_based_chains.contains(k) || void_only_chains.contains(k))
         {
             continue;
         }
