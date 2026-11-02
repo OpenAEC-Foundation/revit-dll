@@ -5,11 +5,15 @@
 
 pub mod cfb;
 pub mod chain;
+pub mod decode;
+pub mod schema;
 pub mod tags;
 mod tags_gen;
 
 pub use cfb::Cfb;
 pub use chain::{chains, section_a_b, strip_inserted, Chain, Element};
+pub use decode::{decode, decode_element, Decoded, EsField, EsSchema, EsSchemas, Node, Object, Value};
+pub use schema::Schema;
 pub use tags::vtag;
 
 #[derive(Debug)]
@@ -43,6 +47,21 @@ pub struct Partition {
     pub chains: Vec<Chain>,
     /// Chains whose element table could not be read (step 1448); they keep no elements.
     pub unreadable: Vec<(usize, String)>,
+}
+
+/// A `Formats/*` or `Global/*` stream, inflated: one gzip member at 0 or after an 8-byte prefix.
+pub fn inflated_stream(cfb: &Cfb, path: &str) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let raw = strip_inserted(&cfb.stream(path)?);
+    let start = [0usize, 8].into_iter().find(|&o| raw.get(o..o + 3) == Some(&[0x1f, 0x8b, 0x08])).ok_or_else(|| Error::Format(format!("{path}: no gzip member")))?;
+    let mut out = Vec::new();
+    flate2::read::GzDecoder::new(&raw[start..]).read_to_end(&mut out)?;
+    Ok(out)
+}
+
+/// Decodes a `Global/*` stream that holds one object: `u16 class` + fields.
+pub fn decode_global<'s>(s: &'s Schema, es: Option<&'s EsSchemas>, b: &[u8]) -> Result<Decoded<'s>> {
+    decode(s, es, b, 2, le_u16(b, 0)?)
 }
 
 /// Opens a file and parses every partition down to element tables.

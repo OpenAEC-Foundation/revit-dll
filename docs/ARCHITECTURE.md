@@ -38,10 +38,48 @@ A port counts as done only when the Rust output matches the reference export:
 | Railings (§35: path, type, host, placement offset, level, height, top rail height/type; `top_rail` sub-record still open) | **done** (core) | 112 files, 246 railings, 0 mismatches |
 | Stairs runs (step 722: width, base/top elevation) | **done** | 111 files, 56 runs, 0 mismatches |
 | Stairs (§33: riser, tread, base/top level and offset, height, risers, base z, runs, run geometry: sketch lines + cached walk path incl. helix; 2014–2017 layout; `type` still open) | **done** (core + run geometry) | 111 files, 39 stairs, 0 mismatches |
-| Other semantic readers (≈ 200 lists of the reference export) | not started | — |
-| Query API: `Document::open`, `info`, `element(id)`, `elements()`, `elements_in_category`, `levels`, `walls` | **started** | CLI `rvt info/element/category/levels` |
+| File schema and generic decoding of every element and `Global/*` object (see "The file describes itself") | **done** | 2 files (2023 32-bit, 2025 64-bit): 560 002 elements, each read to its last byte |
+| Project info, views and sheets, families, element types, parameter definitions, bindings and values | **done** | 2025 file against the live oracle, `tools/parity_oracle.py`: all fields equal except the explained `KNOWN` differences; 2023 file decoded but not yet compared |
+| Other semantic readers (≈ 200 lists of the reference export) | reachable through `rvt class`, no typed struct yet | — |
+| Query API: `Document::open`, `info`, `element(id)`, `decoded(id)`, `elements()`, `elements_in_category`, `levels`, `walls`, `views`, `families`, `parameters`, … | **started** | CLI, see `rvt` usage |
 | Exporters | not started | — |
 | C ABI | stub | — |
+
+## The file describes itself
+
+Stream `Formats/Latest` lists every class of the file with its parent and fields
+(`rvt-core/src/schema.rs` has the layout). Class ids are serial from 12 in order of first
+appearance, and the tags in the element tables are those ids. So tag -> class holds per file and per
+version, and no version table is needed for it.
+
+An element body is the serialised object (`rvt-core/src/decode.rs`): 18-byte header (14 with 32-bit
+ids), fields in schema order from the root class down, pointer targets after the object in first
+in, first out order, then a 4-byte trailer. `Global/Latest` and other `Global/*` streams hold objects
+in the same form, behind `u16 class`. Extensible storage is the one case outside the schema:
+`ESEntity.m_blob` is `u32 marker | guid`, and its blob follows the storage schema with that GUID,
+kept in the document root's `ESSchemaStorage`.
+
+New readers should use the decoded fields (`Document::decoded`, `Node`), not byte patterns. The
+older readers in `rvt-read` still search bytes and could move over. Use `rvt classes`, `rvt schema`,
+`rvt object` and `rvt class` to explore; `rvt check` decodes everything in a file.
+
+Chain 0 of a partition is the project document; other chains are embedded family documents. Chain 0
+also holds content of loaded families (`m_famId` set) and of group types (`m_unplacedOwnerId` set),
+and sub-types with `m_masterId` set. The public API lists none of these.
+
+Stored parameter values are in the element's four `m_pParamValueSet*` tables, keyed by parameter id:
+negative for built-in parameters, otherwise the id of a parameter element. Family types have their
+own table `m_pParams` (values, formulas), which also gives the values an instance does not override.
+Most built-in parameters the API shows are computed by Revit and not stored as such.
+
+## Live oracle
+
+`tools/revit_oracle.py` opens a copy of a model in a running Revit session, exports public-API facts
+to `exports/` and closes it without saving; `tools/parity_oracle.py` compares the readers with that
+export. It addresses the session by port and process id and refuses a session with open documents.
+Its own route runs on Revit's main thread: opening a document from a web-server thread fails, and
+through the UI it crashes Revit. `tools/gen_builtins.py` makes the table of built-in names, which the
+file does not store.
 
 ## Crates
 

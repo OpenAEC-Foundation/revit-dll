@@ -9,3 +9,4 @@ publish.workspace = true
 [dependencies]
 rvt-core.workspace = true
 rvt-model.workspace = true
+serde_json.workspace = true

@@ -6,6 +6,8 @@
 
 use serde::Serialize;
 
+pub mod builtins;
+
 /// Generic view of one element: what the element table says about it.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ElementInfo {
@@ -31,6 +33,12 @@ pub struct DocumentInfo {
     /// 32 or 64 (element-id width in the file).
     pub bits: Option<u8>,
     pub element_count: usize,
+    /// Stream `BasicFileInfo`: format, build, last save path, worksharing, ...
+    pub file: std::collections::BTreeMap<String, String>,
+    /// Builds that saved this file, oldest first.
+    pub saved_by: Vec<String>,
+    /// Classes in the file's own schema.
+    pub schema_classes: usize,
 }
 
 /// One layer of a compound structure (§25).
@@ -405,4 +413,169 @@ pub struct StairsRun {
     pub width: f64,
     pub base_elevation: f64,
     pub top_elevation: f64,
+}
+
+/// Value of a parameter on an element. Lengths in feet, angles in radians, as stored.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ParamValue {
+    /// Negative: built-in parameter. Positive: id of its parameter element.
+    pub id: i64,
+    pub name: Option<String>,
+    /// Name in the public API's `BuiltInParameter`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub builtin: Option<&'static str>,
+    /// "Double", "Integer", "String", "ElementId", or "Stored" for family type values, whose kind
+    /// follows from the definition.
+    pub storage: &'static str,
+    pub value: ParamData,
+    /// Driven by a formula in the family.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub formula: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(untagged)]
+pub enum ParamData {
+    Int(i64),
+    Float(f64),
+    Text(String),
+    None(Option<()>),
+}
+
+/// Project information.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ProjectInfo {
+    pub id: u64,
+    pub name: Option<String>,
+    pub number: Option<String>,
+    pub client_name: Option<String>,
+    pub address: Option<String>,
+    pub status: Option<String>,
+    pub issue_date: Option<String>,
+    pub author: Option<String>,
+    pub building_name: Option<String>,
+    pub organization_name: Option<String>,
+    pub organization_description: Option<String>,
+    pub parameters: Vec<ParamValue>,
+}
+
+/// A view, sheet, schedule or legend. Directions and origin as stored; lengths in feet.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct View {
+    pub id: u64,
+    /// Class in the file's schema.
+    pub class: String,
+    /// Name of the public API's `ViewType`.
+    pub kind: String,
+    pub name: String,
+    pub description: String,
+    pub scale: Option<i64>,
+    pub is_template: bool,
+    pub template: i64,
+    /// View family type.
+    pub view_type: i64,
+    pub level: Option<i64>,
+    pub origin: Option<[f64; 3]>,
+    pub right: Option<[f64; 3]>,
+    pub up: Option<[f64; 3]>,
+    pub direction: Option<[f64; 3]>,
+    pub primary: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail_level: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discipline: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase_filter: Option<i64>,
+    /// Plan views: cut, top, bottom elevations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cut_plane: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_clip: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bottom_clip: Option<f64>,
+    /// Sheets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sheet: Option<SheetInfo>,
+    pub parameters: Vec<ParamValue>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct SheetInfo {
+    pub number: String,
+    pub date: String,
+    pub drawn_by: String,
+    pub checked_by: String,
+    pub designed_by: String,
+    pub approved_by: String,
+    pub issue_date: String,
+}
+
+/// A loaded family.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Family {
+    pub id: u64,
+    pub name: String,
+    /// Path it was loaded from, when stored.
+    pub path: String,
+    pub category: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category_name: Option<&'static str>,
+    pub in_place: bool,
+    pub editable: bool,
+    pub parametric: bool,
+    pub shared: bool,
+    pub host_based: bool,
+    pub work_plane_based: bool,
+    pub curve_based: bool,
+    pub is_2d: bool,
+    pub is_model: bool,
+    /// Family type ids.
+    pub types: Vec<u64>,
+}
+
+/// An element type: family type, wall type, view family type, ...
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ElementType {
+    pub id: u64,
+    pub class: String,
+    pub category: i32,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub family: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub family_name: Option<String>,
+    pub parameters: Vec<ParamValue>,
+}
+
+/// Definition of a shared, project, global or family parameter.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ParameterDef {
+    pub id: u64,
+    pub class: String,
+    /// "shared", "project", "global", "family" or "other".
+    pub kind: &'static str,
+    pub name: String,
+    pub description: String,
+    pub spec: Option<String>,
+    pub group: Option<String>,
+    pub visible: Option<bool>,
+    pub guid: Option<String>,
+    /// Family parameters: per instance, not per type.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance: Option<bool>,
+    /// Owning family, for parameters of a loaded family.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub family: Option<i64>,
+}
+
+/// Binding of a parameter to categories.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ParameterBinding {
+    pub parameter: i64,
+    pub name: Option<String>,
+    /// Name of the public API's class: "InstanceBinding" or "TypeBinding".
+    pub binding: &'static str,
+    pub categories: Vec<i64>,
 }

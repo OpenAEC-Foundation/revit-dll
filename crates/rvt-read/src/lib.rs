@@ -1,5 +1,6 @@
 //! Semantic readers: elements of a Revit file to the neutral model, behind a queryable [`Document`].
 
+mod catalog;
 mod compound;
 mod curves;
 mod instances;
@@ -16,7 +17,8 @@ use std::collections::{HashMap, HashSet};
 use rvt_core::{read_partitions, vtag, Cfb, Chain, Element, Partition};
 use rvt_model::{CompoundType, DocumentInfo, ElementInfo, Floor, Instance, Level, MepSystem, Railing, RailingTypeInfo, Roof, Segment, Stair, Wall};
 
-pub use rvt_core::{Error, Result};
+pub use catalog::{object_json, Parameters};
+pub use rvt_core::{Decoded, Error, Result, Schema};
 
 /// Canonical (2026) class tags used for chain classification (reference reader line `TAG_SEG, …`).
 pub(crate) const TAG_SEG: u16 = 3442;
@@ -63,13 +65,20 @@ pub struct Document {
     systems: Vec<MepSystem>,
     /// RailingType id -> height and top rail, over all chains (step 436, reference `grt`).
     rail_types: HashMap<i64, RailingTypeInfo>,
+    /// The file's own schema and what comes with it; absent if `Formats/Latest` could not be read.
+    formats: Option<catalog::Formats>,
 }
 
 impl Document {
     /// Opens a file from memory (for example bytes received over IPC).
     pub fn from_bytes(data: Vec<u8>) -> Result<Self> {
-        let cfb = Cfb::from_bytes(data)?;
-        Ok(Self::from_partitions(read_partitions(&cfb)?))
+        Self::from_cfb(&Cfb::from_bytes(data)?)
+    }
+
+    fn from_cfb(cfb: &Cfb) -> Result<Self> {
+        let mut doc = Self::from_partitions(read_partitions(cfb)?);
+        doc.formats = catalog::Formats::read(cfb);
+        Ok(doc)
     }
 
     /// Elevation of a level (feet), over chain 0 of all partitions.
@@ -83,8 +92,7 @@ impl Document {
     }
 
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
-        let cfb = Cfb::open(path)?;
-        Ok(Self::from_partitions(read_partitions(&cfb)?))
+        Self::from_cfb(&Cfb::open(path)?)
     }
 
     pub fn from_partitions(partitions: Vec<Partition>) -> Self {
@@ -152,6 +160,7 @@ impl Document {
             type_width: HashMap::new(),
             systems: Vec::new(),
             rail_types: HashMap::new(),
+            formats: None,
         };
         doc.rail_types = railings::rail_types(doc.partitions.iter().flat_map(|p| p.chains.iter()));
         let mut systems: Vec<MepSystem> = Vec::new();
@@ -185,6 +194,9 @@ impl Document {
             version: first.and_then(|c| c.version),
             bits: first.and_then(|c| c.bits),
             element_count: self.index.len(),
+            file: self.formats.as_ref().map(|f| f.file.clone()).unwrap_or_default(),
+            saved_by: self.formats.as_ref().map(|f| f.saved_by.clone()).unwrap_or_default(),
+            schema_classes: self.formats.as_ref().map_or(0, |f| f.schema.len()),
         }
     }
 
