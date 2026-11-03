@@ -2,6 +2,7 @@
 
 mod catalog;
 mod compound;
+mod family;
 mod curves;
 mod instances;
 mod levels;

@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use rvt_core::{decode_element, decode_global, inflated_stream, Cfb, Chain, Decoded, Element, EsField, EsSchema, EsSchemas, Node, Result, Schema, Value};
 use rvt_model::builtins::{builtin_category, builtin_parameter};
-use rvt_model::{ContentDocument, ElementSummary, ElementType, Family, FamilyDefinition, FamilyTypeDefinition, ParamData, ParamValue, ParameterBinding, ParameterDef, ProjectInfo, ScheduleFieldInfo, ScheduleInfo, SheetInfo, View, ViewportInfo, Workset};
+use rvt_model::{ContentDocument, ElementSummary, ElementType, Family, ParamData, ParamValue, ParameterBinding, ParameterDef, ProjectInfo, ScheduleFieldInfo, ScheduleInfo, SheetInfo, View, ViewportInfo, Workset};
 use serde_json::{json, Map, Value as Json};
 
 use crate::Document;
@@ -49,7 +49,7 @@ fn wrapped(n: &Node, field: &str) -> Option<i64> {
     n.child(field)?.int("m_id")
 }
 
-fn guid_string(g: &[u8; 16]) -> String {
+pub(crate) fn guid_text(g: &[u8; 16]) -> String {
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
         g[3], g[2], g[1], g[0], g[5], g[4], g[7], g[6], g[8], g[9], g[10], g[11], g[12], g[13], g[14], g[15]
@@ -212,7 +212,7 @@ fn val_json(d: &Decoded, v: &Value) -> Json {
         Value::Int(i) | Value::Id(i) => json!(i),
         Value::Float(f) => json!(f),
         Value::Str(s) => json!(s),
-        Value::Guid(g) => json!(guid_string(g)),
+        Value::Guid(g) => json!(guid_text(g)),
         Value::List(l) => Json::Array(l.iter().map(|x| val_json(d, x)).collect()),
         Value::Struct(o) => obj_json(d, o),
         Value::Ptr(i) => d.objects.get(*i).map_or(Json::Null, |o| obj_json(d, o)),
@@ -258,7 +258,7 @@ fn element_type_id(n: &Node) -> Option<i64> {
 }
 
 /// First GUID in an object, however deep it is wrapped.
-fn first_guid(n: &Node) -> Option<[u8; 16]> {
+pub(crate) fn first_guid(n: &Node) -> Option<[u8; 16]> {
     n.o.fields.iter().find_map(|(_, v)| match v {
         Value::Guid(g) => Some(*g),
         Value::Struct(o) => first_guid(&Node { d: n.d, o }),
@@ -387,7 +387,7 @@ impl Document {
     }
 
     /// Current records of the project document, by element id.
-    fn host_elements(&self) -> impl Iterator<Item = (&Chain, &Element)> + '_ {
+    pub(crate) fn host_elements(&self) -> impl Iterator<Item = (&Chain, &Element)> + '_ {
         self.host.iter().map(|&(pi, ei)| {
             let c = &self.partitions[pi].chains[0];
             (c, &c.elements[ei])
@@ -399,18 +399,18 @@ impl Document {
         self.formats.as_ref().map_or(&[], |f| &f.worksets)
     }
 
-    fn is_a(&self, e: &Element, base: u16) -> bool {
+    pub(crate) fn is_a(&self, e: &Element, base: u16) -> bool {
         e.tag.and_then(|t| self.schema()?.class(t)).is_some_and(|c| c.lineage.contains(&base))
     }
 
-    fn decode(&self, ch: &Chain, e: &Element) -> Option<Result<Decoded<'_>>> {
+    pub(crate) fn decode(&self, ch: &Chain, e: &Element) -> Option<Result<Decoded<'_>>> {
         let f = self.formats.as_ref()?;
         Some(decode_element(&f.schema, Some(&f.es), ch, e))
     }
 
     /// Chain 0 elements of a schema class or a class derived from it, decoded. This includes the
     /// content of loaded families and of group types.
-    fn host_all<'a>(&'a self, base: &str) -> Vec<(&'a Element, Decoded<'a>)> {
+    pub(crate) fn host_all<'a>(&'a self, base: &str) -> Vec<(&'a Element, Decoded<'a>)> {
         let Some(id) = self.schema().and_then(|s| s.id_of(base)) else { return Vec::new() };
         self.host_elements().filter(|(_, e)| self.is_a(e, id)).filter_map(|(c, e)| Some((e, self.decode(c, e)?.ok()?))).collect()
     }
@@ -506,7 +506,7 @@ impl Document {
     }
 
     /// Captions of all parameter elements in the project.
-    fn parameter_names(&self) -> HashMap<i64, String> {
+    pub(crate) fn parameter_names(&self) -> HashMap<i64, String> {
         self.host_all("ParamElem")
             .iter()
             .filter_map(|(e, d)| Some((e.id as i64, d.root().ptr("m_pParamDef")?.str("m_caption")?.to_string())))
@@ -548,7 +548,7 @@ impl Document {
         out
     }
 
-    fn named_values(&self, items: &[Node], names: &HashMap<i64, String>) -> Vec<ParamValue> {
+    pub(crate) fn named_values(&self, items: &[Node], names: &HashMap<i64, String>) -> Vec<ParamValue> {
         items.iter().filter_map(named_param).map(|t| self.param_value(t, names)).collect()
     }
 
@@ -628,31 +628,10 @@ impl Document {
             let start = marker.end + 4;
             let owner_family = rvt_core::le_u16(b, start).ok().and_then(|t| rvt_core::decode(&f.schema, Some(&f.es), b, start + 2, t).ok()).and_then(|d| d.root().id("m_ownerFamilyId"));
             let chain = key.and_then(|k| self.partitions.iter().find_map(|p| p.chains.iter().find(|c| c.key == Some(k)).map(|c| c.index)));
-            out.push(ContentDocument { key: key.map_or(String::new(), |k| guid_string(&k)), element_count, owner_family, chain });
+            out.push(ContentDocument { key: key.map_or(String::new(), |k| guid_text(&k)), element_count, owner_family, chain });
             o = start + size as usize + 4;
         }
         out
-    }
-
-    /// A family's definition. Without `id`: the family this file defines.
-    pub fn family_definition(&self, id: Option<u64>) -> Option<FamilyDefinition> {
-        let id = id.or_else(|| self.formats.as_ref()?.owner_family.map(|f| f as u64))?;
-        let names = self.parameter_names();
-        let d = self.decoded(id)?.ok()?;
-        let n = d.root();
-        let table = n.ptr("m_pFamilyTypes");
-        let types = table.map_or(Vec::new(), |t| {
-            t.items("m_pairs")
-                .iter()
-                .map(|p| FamilyTypeDefinition {
-                    name: p.str("name").unwrap_or_default().to_string(),
-                    parameters: p.child("params").map_or(Vec::new(), |q| self.named_values(&q.items("m_params"), &names)),
-                })
-                .collect()
-        });
-        let current = n.ptr("m_familyParams").map_or(Vec::new(), |q| self.named_values(&q.items("m_params"), &names));
-        let document_chain = self.content_documents().into_iter().find(|c| c.owner_family == Some(id as i64)).and_then(|c| c.chain);
-        Some(FamilyDefinition { id, name: n.str("m_name").unwrap_or_default().to_string(), category: n.id("m_categoryId").unwrap_or(-1), types, current, document_chain })
     }
 
     pub fn project_info(&self) -> Option<ProjectInfo> {
@@ -824,7 +803,7 @@ impl Document {
                 let forge = |f: &str| def.and_then(|x| x.child(f)).and_then(|x| x.str("m_typeId")).filter(|s| !s.is_empty()).map(String::from);
                 let spec = forge("m_specTypeId").or_else(|| def.and_then(|x| implied_spec(x.class())).map(String::from));
                 let guid = n.child("m_externalParamKey").and_then(|k| k.child("m_guidValue")).and_then(|g| match g.get("m_guid") {
-                    Some(Value::Guid(v)) => Some(guid_string(v)),
+                    Some(Value::Guid(v)) => Some(guid_text(v)),
                     _ => None,
                 });
                 ParameterDef {
@@ -875,7 +854,7 @@ mod tests {
     #[test]
     fn guid_is_written_in_the_usual_mixed_endian_form() {
         let bytes = [0xf7, 0x67, 0x03, 0x07, 0x38, 0x09, 0xb2, 0x47, 0xb1, 0xab, 0x51, 0xf4, 0xba, 0xfe, 0x69, 0x40];
-        assert_eq!(guid_string(&bytes), "070367f7-0938-47b2-b1ab-51f4bafe6940");
+        assert_eq!(guid_text(&bytes), "070367f7-0938-47b2-b1ab-51f4bafe6940");
     }
 
     #[test]

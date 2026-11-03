@@ -122,6 +122,10 @@ def main():
                 if kinds.get(int(pid)) != "ElementId" and int(pid) in have:
                     pairs.append(((t["name"], pid), v or None, have[int(pid)] or None))
         rep.field("family", "values", pairs)
+        by_id = {p["id"]: p for p in got["parameters"]}
+        rep.field("family", "parameter_names", [(p["id"], p["name"], (by_id.get(p["id"]) or {}).get("name")) for p in fam["parameters"] if p["id"] in by_id])
+        rep.field("family", "instance", [(p["id"], p["instance"], by_id[p["id"]]["instance"]) for p in fam["parameters"] if p["id"] in by_id])
+        rep.field("family", "formula_text", [(p["id"], p["formula"], (by_id.get(p["id"]) or {}).get("formula")) for p in fam["parameters"] if p["formula"]])
         rep.field("family", "formulas", [(p["id"], True, any(q["id"] == p["id"] and q.get("formula") for t in got["types"] for q in t["parameters"]) or any(q["id"] == p["id"] and q.get("formula") for q in got["current"])) for p in fam["parameters"] if p["formula"]])
         print("FAILED" if rep.fails else "PASSED", rep.fails)
         sys.exit(1 if rep.fails else 0)

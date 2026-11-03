@@ -656,18 +656,125 @@ pub struct Workset {
     pub modified: Option<i64>,
 }
 
-/// A family's own definition: its types with their values.
+/// A family's own definition: what makes it behave as it does.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct FamilyDefinition {
     pub id: u64,
     pub name: String,
     pub category: i64,
+    pub parameters: Vec<FamilyParameter>,
     pub types: Vec<FamilyTypeDefinition>,
     /// The family's current values.
     pub current: Vec<ParamValue>,
+    pub solids: Vec<FamilySolid>,
+    pub reference_planes: Vec<FamilyReferencePlane>,
+    /// Dimensions, with the parameter that labels each segment.
+    pub dimensions: Vec<FamilyDimension>,
+    pub nested: Vec<NestedFamily>,
+    /// Which parameters drive which values of which elements.
+    pub driven: Vec<DrivenValue>,
     /// Chain of the embedded family document, when the family is loaded in a project.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub document_chain: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct FamilyParameter {
+    pub id: i64,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub builtin: Option<&'static str>,
+    pub instance: bool,
+    pub reporting: bool,
+    /// Formula text; lengths in millimetres, angles in degrees.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub formula: Option<String>,
+    pub spec: Option<String>,
+    pub group: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guid: Option<String>,
+}
+
+/// A solid or void form. Lengths in feet, angles in radians.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct FamilySolid {
+    pub id: u64,
+    pub class: String,
+    /// "extrusion", "blend", "revolve", "sweep", "swept_blend", "free_form", "form" or "other".
+    pub kind: &'static str,
+    pub is_void: bool,
+    pub visible: Option<bool>,
+    pub material: Option<i64>,
+    pub subcategory: Option<i64>,
+    /// Bits per detail level and view direction, as stored; their meaning is not established yet.
+    pub visibility_flags: Option<i64>,
+    pub start: Option<f64>,
+    pub end: Option<f64>,
+    pub sketches: Vec<i64>,
+    /// Profile loops in the sketch plane or the stored loops, where the file gives them this way.
+    pub loops: Vec<Vec<Curve>>,
+    pub links: Vec<FamilyLink>,
+}
+
+/// An element property driven by a family parameter.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct FamilyLink {
+    pub property: i64,
+    pub property_name: String,
+    pub parameter: i64,
+    pub parameter_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct FamilyReferencePlane {
+    pub id: u64,
+    pub name: String,
+    pub origin: Option<[f64; 3]>,
+    pub normal: Option<[f64; 3]>,
+    /// The "Is Reference" setting, as stored.
+    pub reference_kind: i64,
+    pub links: Vec<FamilyLink>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct FamilyDimension {
+    pub id: u64,
+    pub class: String,
+    pub view: Option<i64>,
+    pub segments: Vec<FamilyDimensionSegment>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct FamilyDimensionSegment {
+    pub value: Option<f64>,
+    pub label: Option<i64>,
+    pub label_name: Option<String>,
+}
+
+/// A family placed inside a family.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct NestedFamily {
+    pub id: u64,
+    pub symbol: i64,
+    pub type_name: Option<String>,
+    pub family: Option<i64>,
+    pub family_name: Option<String>,
+    pub links: Vec<FamilyLink>,
+}
+
+/// A value of an element that follows from parameters: the sum of factor x parameter.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct DrivenValue {
+    pub element: i64,
+    pub index: i64,
+    pub terms: Vec<DrivenValueTerm>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct DrivenValueTerm {
+    pub factor: f64,
+    pub parameter: i64,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]

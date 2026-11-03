@@ -85,6 +85,21 @@ negative for built-in parameters, otherwise the id of a parameter element. Famil
 own table `m_pParams` (values, formulas), which also gives the values an instance does not override.
 Most built-in parameters the API shows are computed by Revit and not stored as such.
 
+## Family intelligence
+
+`Document::family_definition` (`rvt family`, `rvt-read/src/family.rs`) gives per family:
+
+- parameters and values per type: `Family.m_familyParams`, `m_pFamilyTypes`; formula trees in
+  `NamedParam.m_oExpression`;
+- forms: classes derived from `GenSweep`, `m_cutting` = void; loops in `ExtrusionElemExtrusionHelper`
+  or through `SketchMembership.m_groupId` of `CurveElem`s;
+- parameter links: `FamilyParametrizedElemParamsCell.m_paramDrivenData` (`ParamIdPair`);
+- labels: `Dimension.m_ArrSegInfo[].m_paramId`; driven values: `m_oFamDimConstrMgr.m_paramExprs`;
+- nesting: `FamilyInstance` elements owned by the family;
+- loaded families: `Family.m_oFamDoc` holds the key of the embedded document's chain, whose own
+  `Family` element (`m_ownerFamilyId` of that document) has the definition; the types stay on the
+  project's `Family` element.
+
 ## Tested files and limits
 
 `rvt check` decodes every element. Limits known today:
@@ -93,8 +108,13 @@ Most built-in parameters the API shows are computed by Revit and not stored as s
   no `Formats/Latest`: not readable. Header 4 partitions of about the same age are refused too.
 - Extensible-storage blobs whose schema is not in the document stop that one element's decoding
   after its own fields (`Decoded::complete` false, `partial_unknown_storage` in `rvt check`).
-- Formula trees are stored (`m_oExpression`) but not rendered as text yet: only operator 3 (`*`) is
-  established; the other operator and function codes need more oracle runs.
+- Formula codes come from recomputing 2 534 formulas of 256 families with the values stored per type;
+  one formula was compared with the API text. Function 8 is unknown, and `>`/`<` could be `>=`/`<=`
+  as far as the numbers tell. Constants in older files have no spec, so their unit is not known.
+- `FamElemVisibility.m_flags` (detail levels, view directions) and `m_refName` of reference planes
+  are passed on as stored; forms, reference planes, labels and nesting of `rvt family` were not
+  compared with the API yet. Blend, sweep and swept blend profiles are only as far as sketches give
+  them.
 - Worksets were not compared with the oracle yet; no workshared file in the session's version was
   run. The partition choice rule above rests on few cases.
 - Crop regions, and the type of elevations without `m_dbViewTypeId`, were not found. Names of some
