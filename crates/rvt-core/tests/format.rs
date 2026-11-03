@@ -243,6 +243,86 @@ fn entity_blob_is_decoded_by_its_storage_schema_in_entry_order() {
     assert_eq!(e.class(), "S");
     assert_eq!(e.str("first"), Some("z"));
     assert!(matches!(e.get("second"), Some(Value::List(v)) if matches!(v[0], Value::Int(6))));
-    // without storage schemas the blob's size is unknown
-    assert!(decode(&s, None, &b, 0, s.id_of("X").unwrap()).is_err());
+    assert!(d.complete);
+    // without storage schemas the blob's size is unknown: the object is there, the rest is not read
+    let partial = decode(&s, None, &b, 0, s.id_of("X").unwrap()).unwrap();
+    assert!(!partial.complete);
+    assert_eq!(partial.end, 20);
+    assert!(partial.root().child("m_e").unwrap().ptr("m_blob").is_some());
+}
+
+#[test]
+fn old_schemas_have_no_guid_list_and_still_parse() {
+    // Revit 2012 and earlier: class := name | parent | version | nf | fields, then the next record.
+    let b = B::default()
+        .class("A").u16(0).u32(1).u32(1).field("m_i", [4, 0, 0, 0])
+        .class("B").u16(12).u32(1).u32(0);
+    let s = Schema::parse(&b.0).unwrap();
+    assert_eq!(s.id_of("A"), Some(12));
+    assert_eq!(s.class(13).unwrap().parent, 12);
+    assert_eq!(s.class(12).unwrap().fields.len(), 1);
+}
+
+/// One 32-bit element: id 5, category -3, class tag 77, body of 20 bytes.
+fn chain_32(version_code: u16) -> rvt_core::Chain {
+    let mut d = vec![0u8; 48];
+    d[0..4].copy_from_slice(&5u32.to_le_bytes());
+    d[4..8].copy_from_slice(&36u32.to_le_bytes());
+    d[8..10].copy_from_slice(&version_code.to_le_bytes());
+    d[14..18].copy_from_slice(&(-3i32).to_le_bytes());
+    d[46..48].copy_from_slice(&77u16.to_le_bytes());
+    d.extend_from_slice(&[0xff; 12]);
+    d.extend_from_slice(&5u32.to_le_bytes());
+    d.extend_from_slice(&[0; 4]);
+    d.extend_from_slice(&4u32.to_le_bytes());
+    d.extend_from_slice(&[0; 8]);
+    rvt_core::Chain { index: 0, key: None, count: 1, data: d, bits: None, id_bits: None, version: None, elements: vec![], hdr: 0 }
+}
+
+#[test]
+fn an_unknown_version_code_is_readable_when_the_schema_gives_the_id_width() {
+    let mut ch = chain_32(0x040a);
+    rvt_core::section_a_b_with(&mut ch, Some(4)).unwrap();
+    assert_eq!(ch.elements.len(), 1);
+    assert_eq!(ch.elements[0].tag, Some(77));
+    assert_eq!(ch.elements[0].cat, -3);
+    assert_eq!(ch.id_bits, Some(32));
+    // version-specific readers keep away: no known version, no `bits`
+    assert_eq!(ch.bits, None);
+    assert_eq!(ch.version, None);
+}
+
+#[test]
+fn fields_marked_as_not_saved_are_absent_from_the_body() {
+    // extra bytes with bit 1 set: the field exists in memory only (seen with values 2, 18 and 34)
+    let s = with_element_id(|b| {
+        b.class("X").u16(0).u32(0).u32(3)
+            .field("m_saved", [1, 0, 0, 0])
+            .field("m_temp", [1, 0, 34, 0])
+            .field("m_count", [4, 0, 4, 0]) // extra 4: stored as usual
+            .u32(0)
+    });
+    let mut b = vec![1u8];
+    b.extend_from_slice(&7i32.to_le_bytes());
+    let d = decode(&s, None, &b, 0, s.id_of("X").unwrap()).unwrap();
+    assert_eq!(d.end, 5);
+    assert_eq!(d.root().bool("m_saved"), Some(true));
+    assert_eq!(d.root().int("m_count"), Some(7));
+    assert!(d.root().get("m_temp").is_none());
+}
+
+#[test]
+fn workshared_32_bit_entries_shift_by_14_bytes_per_workset_record() {
+    // u16 @10 = number of 14-byte records after @14; category, owner, view and tag move with them
+    let mut ch = chain_32(0x040a);
+    let extra = 2usize;
+    let mut d = ch.data[..14].to_vec();
+    d[10..12].copy_from_slice(&(extra as u16).to_le_bytes());
+    d[4..8].copy_from_slice(&((36 + 14 * extra) as u32).to_le_bytes());
+    d.extend(std::iter::repeat(0xAB).take(14 * extra));
+    d.extend_from_slice(&ch.data[14..]);
+    ch.data = d;
+    rvt_core::section_a_b_with(&mut ch, Some(4)).unwrap();
+    assert_eq!(ch.elements[0].cat, -3);
+    assert_eq!(ch.elements[0].tag, Some(77));
 }

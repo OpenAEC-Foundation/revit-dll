@@ -85,6 +85,9 @@ pub struct Decoded<'s> {
     pub objects: Vec<Object<'s>>,
     /// Offset after the last byte read.
     pub end: usize,
+    /// False when reading stopped at an extensible-storage blob whose schema is not in the file:
+    /// its size is unknown, so what comes after it is not read.
+    pub complete: bool,
 }
 
 impl<'s> Decoded<'s> {
@@ -193,6 +196,7 @@ impl<'a, 's> Node<'a, 's> {
 enum Target {
     Class(u16),
     Es([u8; 16]),
+    Unknown,
 }
 
 struct Dec<'a, 's> {
@@ -329,7 +333,7 @@ impl<'s> Dec<'_, 's> {
         let mut out = Vec::new();
         for &id in &c.lineage {
             let level = schema.class(id).expect("lineage is checked at parse");
-            for f in &level.fields {
+            for f in level.fields.iter().filter(|f| f.ty.saved) {
                 out.push((f.name.as_str(), self.value(&f.ty)?));
             }
         }
@@ -371,8 +375,10 @@ impl<'s> Dec<'_, 's> {
         } else {
             let g: [u8; 16] = self.b.get(self.o..self.o + 16).ok_or_else(|| Error::Format(format!("entity at {at} past end")))?.try_into().expect("16 bytes");
             self.o += 16;
-            let s = self.es.and_then(|e| e.get(&g)).ok_or_else(|| Error::Format(format!("entity at {at}: storage schema not known")))?;
-            self.queued(s.name.as_str(), Target::Es(g))
+            match self.es.and_then(|e| e.get(&g)) {
+                Some(s) => self.queued(s.name.as_str(), Target::Es(g)),
+                None => self.queued("ESBlob", Target::Unknown),
+            }
         };
         Ok(Value::Struct(Box::new(Object { class: name, fields: vec![("m_blob", blob)] })))
     }
@@ -420,9 +426,14 @@ pub fn decode<'s>(s: &'s Schema, es: Option<&'s EsSchemas>, b: &[u8], start: usi
     let name = s.class(class).ok_or_else(|| Error::Format(format!("unknown class {class}")))?.name.as_str();
     let mut d = Dec { s, es, b, o: start, objects: vec![Object { class: name, fields: Vec::new() }], queue: VecDeque::new(), depth: 0 };
     d.objects[0].fields = d.fields_of(class)?;
+    let mut complete = true;
     while let Some((slot, target)) = d.queue.pop_front() {
         d.depth = 0;
         let fields = match target {
+            Target::Unknown => {
+                complete = false;
+                break;
+            }
             Target::Class(c) => d.fields_of(c)?,
             Target::Es(g) => {
                 let schema = es.and_then(|e| e.get(&g)).expect("checked when queued");
@@ -431,16 +442,16 @@ pub fn decode<'s>(s: &'s Schema, es: Option<&'s EsSchemas>, b: &[u8], start: usi
         };
         d.objects[slot].fields = fields;
     }
-    Ok(Decoded { objects: d.objects, end: d.o })
+    Ok(Decoded { objects: d.objects, end: d.o, complete })
 }
 
 /// Decodes an element's body; the whole body must be consumed.
 pub fn decode_element<'s>(s: &'s Schema, es: Option<&'s EsSchemas>, ch: &Chain, e: &Element) -> Result<Decoded<'s>> {
     let tag = e.tag.ok_or_else(|| Error::Format(format!("element {} has no class tag", e.id)))?;
-    let start = if ch.bits == Some(32) { 14 } else { 18 };
+    let start = if ch.id_bits == Some(32) { 14 } else { 18 };
     let body = ch.body(e);
     let d = decode(s, es, body, start, tag)?;
-    if d.end + 4 != body.len() {
+    if d.complete && d.end + 4 != body.len() {
         return Err(Error::Format(format!("element {}: decoded {} of {} bytes", e.id, d.end, body.len() - 4)));
     }
     Ok(d)

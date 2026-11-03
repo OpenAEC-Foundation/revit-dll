@@ -38,8 +38,8 @@ A port counts as done only when the Rust output matches the reference export:
 | Railings (§35: path, type, host, placement offset, level, height, top rail height/type; `top_rail` sub-record still open) | **done** (core) | 112 files, 246 railings, 0 mismatches |
 | Stairs runs (step 722: width, base/top elevation) | **done** | 111 files, 56 runs, 0 mismatches |
 | Stairs (§33: riser, tread, base/top level and offset, height, risers, base z, runs, run geometry: sketch lines + cached walk path incl. helix; 2014–2017 layout; `type` still open) | **done** (core + run geometry) | 111 files, 39 stairs, 0 mismatches |
-| File schema and generic decoding of every element and `Global/*` object (see "The file describes itself") | **done** | 2 files (2023 32-bit, 2025 64-bit): 560 002 elements, each read to its last byte |
-| Project info, views and sheets, families, element types, parameter definitions, bindings and values | **done** | 2025 file against the live oracle, `tools/parity_oracle.py`: all fields equal except the explained `KNOWN` differences; 2023 file decoded but not yet compared |
+| File schema and generic decoding of every element and `Global/*` object (see "The file describes itself") | **done** | Formats 2009, 2012, 2019–2027 including workshared centrals, see "Tested files and limits" |
+| Project info, views, sheets with viewports, schedule fields, families with types and values, element types, parameter definitions, bindings and values, worksets, element summary | **done** | Against the live oracle, `tools/parity_oracle.py`: 2025 models and families, and 2019 and 2023 files upgraded in memory |
 | Other semantic readers (≈ 200 lists of the reference export) | reachable through `rvt class`, no typed struct yet | — |
 | Query API: `Document::open`, `info`, `element(id)`, `decoded(id)`, `elements()`, `elements_in_category`, `levels`, `walls`, `views`, `families`, `parameters`, … | **started** | CLI, see `rvt` usage |
 | Exporters | not started | — |
@@ -52,6 +52,11 @@ Stream `Formats/Latest` lists every class of the file with its parent and fields
 appearance, and the tags in the element tables are those ids. So tag -> class holds per file and per
 version, and no version table is needed for it.
 
+A field type with bit 1 set in its extra bytes is not saved and does not occur in bodies (seen from
+2027). Revit 2012 and earlier write classes without a GUID list. Where the version code of a chain is
+not known, the element id width in the schema decides the table layout, and the byte-level readers
+leave that chain alone (`Chain::bits` stays empty).
+
 An element body is the serialised object (`rvt-core/src/decode.rs`): 18-byte header (14 with 32-bit
 ids), fields in schema order from the root class down, pointer targets after the object in first
 in, first out order, then a 4-byte trailer. `Global/Latest` and other `Global/*` streams hold objects
@@ -63,6 +68,14 @@ New readers should use the decoded fields (`Document::decoded`, `Node`), not byt
 older readers in `rvt-read` still search bytes and could move over. Use `rvt classes`, `rvt schema`,
 `rvt object` and `rvt class` to explore; `rvt check` decodes everything in a file.
 
+`Global/ElemTable` lists the live elements with their partition (workset) and save counters. Chain 0
+of a partition can hold records that are no longer live, and an element can have a copy in several
+partitions; so far the highest partition number held the newest copy (only 2 cases could tell).
+`Global/PartitionTable` lists the worksets, `Global/ContentDocuments` holds per embedded document a
+marker, `u32` size, `ADocument` and `u32` size: `m_ownerFamilyId` gives the family, the marker's key
+the chain. A family's own types and values are in `Family.m_pFamilyTypes`. `RevitPreview4.0` wraps a
+PNG, `PartAtom` (families) and the zip in `ProjectInformation` (projects) hold atom XML.
+
 Chain 0 of a partition is the project document; other chains are embedded family documents. Chain 0
 also holds content of loaded families (`m_famId` set) and of group types (`m_unplacedOwnerId` set),
 and sub-types with `m_masterId` set. The public API lists none of these.
@@ -72,13 +85,34 @@ negative for built-in parameters, otherwise the id of a parameter element. Famil
 own table `m_pParams` (values, formulas), which also gives the values an instance does not override.
 Most built-in parameters the API shows are computed by Revit and not stored as such.
 
+## Tested files and limits
+
+`rvt check` decodes every element. Limits known today:
+
+- Files older than Revit 2009 keep their data in other streams (`Elements`, root `Latest`) and have
+  no `Formats/Latest`: not readable. Header 4 partitions of about the same age are refused too.
+- Extensible-storage blobs whose schema is not in the document stop that one element's decoding
+  after its own fields (`Decoded::complete` false, `partial_unknown_storage` in `rvt check`).
+- Formula trees are stored (`m_oExpression`) but not rendered as text yet: only operator 3 (`*`) is
+  established; the other operator and function codes need more oracle runs.
+- Worksets were not compared with the oracle yet; no workshared file in the session's version was
+  run. The partition choice rule above rests on few cases.
+- Crop regions, and the type of elevations without `m_dbViewTypeId`, were not found. Names of some
+  classes (detail lines, sketches) are labels from Revit and not stored.
+- Parameter definitions before about 2021 store `m_unitType` (a number) instead of a spec id; the
+  numbers are passed on as they are.
+- Most built-in parameter values the API shows are computed and not stored.
+
 ## Live oracle
 
 `tools/revit_oracle.py` opens a copy of a model in a running Revit session, exports public-API facts
 to `exports/` and closes it without saving; `tools/parity_oracle.py` compares the readers with that
-export. It addresses the session by port and process id and refuses a session with open documents.
-Its own route runs on Revit's main thread: opening a document from a web-server thread fails, and
-through the UI it crashes Revit. `tools/gen_builtins.py` makes the table of built-in names, which the
+export. It addresses the session by port and process id and refuses a session with open documents,
+unless they are named with `--beside`. Its own route runs on Revit's main thread: opening a document
+from a web-server thread fails, and through the UI it crashes Revit. Files of an older format are
+upgraded in memory, so the API then shows what the upgrade made of them; parity reports those
+differences without failing. Repeated exports in one low-memory session have ended in a crash in
+Revit itself: prefer a fresh session and enough free memory for long runs. `tools/gen_builtins.py` makes the table of built-in names, which the
 file does not store.
 
 ## Crates

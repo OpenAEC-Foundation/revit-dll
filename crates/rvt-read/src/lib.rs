@@ -67,6 +67,8 @@ pub struct Document {
     rail_types: HashMap<i64, RailingTypeInfo>,
     /// The file's own schema and what comes with it; absent if `Formats/Latest` could not be read.
     formats: Option<catalog::Formats>,
+    /// (partition, element) of the current record of each project element.
+    host: Vec<(usize, usize)>,
 }
 
 impl Document {
@@ -78,6 +80,7 @@ impl Document {
     fn from_cfb(cfb: &Cfb) -> Result<Self> {
         let mut doc = Self::from_partitions(read_partitions(cfb)?);
         doc.formats = catalog::Formats::read(cfb);
+        doc.select_live_records();
         Ok(doc)
     }
 
@@ -104,6 +107,9 @@ impl Document {
         let (mut owner32, mut view_owners) = (HashMap::new(), HashSet::new());
         for (pi, p) in partitions.iter().enumerate() {
             for (ci, ch) in p.chains.iter().enumerate() {
+                for (ei, e) in ch.elements.iter().enumerate() {
+                    index.entry(e.id).or_insert((pi, ci, ei));
+                }
                 if ch.bits.is_none() {
                     continue;
                 }
@@ -114,8 +120,7 @@ impl Document {
                 }
                 let lt = vtag(ch.version, TAG_LEVEL_TYPE);
                 let rec = vtag(ch.version, TAG_WALL_RECORD);
-                for (ei, e) in ch.elements.iter().enumerate() {
-                    index.entry(e.id).or_insert((pi, ci, ei));
+                for e in &ch.elements {
                     if e.tag.is_some() && e.tag == lt {
                         level_types.insert(e.id);
                     }
@@ -161,6 +166,7 @@ impl Document {
             systems: Vec::new(),
             rail_types: HashMap::new(),
             formats: None,
+            host: Vec::new(),
         };
         doc.rail_types = railings::rail_types(doc.partitions.iter().flat_map(|p| p.chains.iter()));
         let mut systems: Vec<MepSystem> = Vec::new();
@@ -189,7 +195,7 @@ impl Document {
     }
 
     pub fn info(&self) -> DocumentInfo {
-        let first = self.project.first().map(|&(p, c)| &self.partitions[p].chains[c]);
+        let first = self.project.first().map(|&(p, c)| &self.partitions[p].chains[c]).or_else(|| self.partitions.iter().find_map(|p| p.chains.first()));
         DocumentInfo {
             version: first.and_then(|c| c.version),
             bits: first.and_then(|c| c.bits),
@@ -197,6 +203,9 @@ impl Document {
             file: self.formats.as_ref().map(|f| f.file.clone()).unwrap_or_default(),
             saved_by: self.formats.as_ref().map(|f| f.saved_by.clone()).unwrap_or_default(),
             schema_classes: self.formats.as_ref().map_or(0, |f| f.schema.len()),
+            owner_family: self.formats.as_ref().and_then(|f| f.owner_family),
+            atom: self.formats.as_ref().and_then(|f| f.atom.clone()),
+            transmission: self.formats.as_ref().and_then(|f| f.transmission.clone()),
         }
     }
 

@@ -22,6 +22,11 @@ const USAGE: &str = "usage:
   rvt families <file.rvt>              loaded families
   rvt types <file.rvt>                 element types with their parameters
   rvt parameters <file.rvt>            parameter definitions and bindings
+  rvt family <file.rvt> [id]           a family's definition: types and values (no id: of a family file)
+  rvt worksets <file.rvt>              worksets
+  rvt documents <file.rvt>             embedded documents and the families they belong to
+  rvt summary <file.rvt>               every project element: class, category, name, type, owner view
+  rvt preview <file.rvt> <out.png>     write the stored thumbnail
   rvt params <file.rvt> <id>           parameter values of one element
   rvt object <file.rvt> <id>           one element fully decoded with the file's schema
   rvt class <file.rvt> <class>         all project elements of a schema class, fully decoded
@@ -99,6 +104,20 @@ fn run(args: &[String]) -> Result<Value, String> {
     match cmd {
         "elements" => elements(path).map_err(err),
         "dump" => dump(path, args.get(2).ok_or(USAGE)?).map_err(err),
+        "family" => {
+            let id = args.get(2).and_then(|s| s.parse().ok());
+            to(serde_json::to_value(rvt_read::Document::open(path).map_err(err)?.family_definition(id)))
+        }
+        "worksets" => to(serde_json::to_value(rvt_read::Document::open(path).map_err(err)?.worksets())),
+        "documents" => to(serde_json::to_value(rvt_read::Document::open(path).map_err(err)?.content_documents())),
+        "summary" => to(serde_json::to_value(rvt_read::Document::open(path).map_err(err)?.element_summaries())),
+        "preview" => {
+            let doc = rvt_read::Document::open(path).map_err(err)?;
+            let png = doc.preview().ok_or("no preview in this file")?;
+            let out = args.get(2).ok_or(USAGE)?;
+            std::fs::write(out, png).map_err(|e| e.to_string())?;
+            Ok(json!({"bytes": png.len()}))
+        }
         "project_info" => to(serde_json::to_value(rvt_read::Document::open(path).map_err(err)?.project_info())),
         "views" => to(serde_json::to_value(rvt_read::Document::open(path).map_err(err)?.views())),
         "families" => to(serde_json::to_value(rvt_read::Document::open(path).map_err(err)?.families())),

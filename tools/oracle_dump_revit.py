@@ -204,7 +204,7 @@ def dump(doc, info):
     meta["version"] = {"number": app.VersionNumber, "build": app.VersionBuild}
     meta["basic_file_info"] = info
     meta["creation_guid"] = str(attempt(lambda: doc.CreationGUID))
-    pi = doc.ProjectInformation
+    pi = attempt(lambda: doc.ProjectInformation)
     if pi is not None:
         row = base_row(pi)
         for k in ("Address", "Author", "BuildingName", "ClientName", "IssueDate", "Number", "OrganizationDescription", "OrganizationName", "Status"):
@@ -283,8 +283,8 @@ def dump(doc, info):
             r["reporting"] = attempt(lambda: pe.IsReporting)
         defs.append(r)
     bindings = []
-    it = doc.ParameterBindings.ForwardIterator()
-    while it.MoveNext():
+    it = attempt(lambda: doc.ParameterBindings.ForwardIterator())
+    while it is not None and it.MoveNext():
         d, b = it.Key, it.Current
         bindings.append(
             {
@@ -295,6 +295,51 @@ def dump(doc, info):
             }
         )
     write_json("parameters.json", {"definitions": defs, "bindings": bindings})
+
+    if doc.IsFamilyDocument:
+        fm = doc.FamilyManager
+        owner = doc.OwnerFamily
+        fparams = []
+        for fp in fm.Parameters:
+            fparams.append(
+                {
+                    "id": eid(fp.Id),
+                    "name": fp.Definition.Name,
+                    "instance": fp.IsInstance,
+                    "shared": fp.IsShared,
+                    "guid": str(fp.GUID) if fp.IsShared else None,
+                    "reporting": fp.IsReporting,
+                    "formula": fp.Formula,
+                    "storage": str(fp.StorageType),
+                    "spec": attempt(lambda: fp.Definition.GetDataType().TypeId),
+                }
+            )
+        ftypes = []
+        for ft in fm.Types:
+            vals = {}
+            for fp in fm.Parameters:
+                if ft.HasValue(fp):
+                    st = str(fp.StorageType)
+                    if st == "Double":
+                        vals[str(eid(fp.Id))] = ft.AsDouble(fp)
+                    elif st == "Integer":
+                        vals[str(eid(fp.Id))] = ft.AsInteger(fp)
+                    elif st == "String":
+                        vals[str(eid(fp.Id))] = ft.AsString(fp)
+                    elif st == "ElementId":
+                        vals[str(eid(fp.Id))] = eid(ft.AsElementId(fp))
+            ftypes.append({"name": ft.Name, "values": vals})
+        write_json(
+            "family.json",
+            {
+                "owner": eid(owner.Id),
+                "name": owner.Name,
+                "category": eid(attempt(lambda: owner.FamilyCategoryId)),
+                "current_type": attempt(lambda: fm.CurrentType.Name),
+                "parameters": fparams,
+                "types": ftypes,
+            },
+        )
 
     cats = []
 

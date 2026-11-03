@@ -4,7 +4,8 @@ Usage: python -I revit_oracle.py --port <port> --pid <pid> <file.rvt> <output di
        python -I revit_oracle.py --port <port> --pid <pid> --code <script.py> [file output]
 
 The session is addressed explicitly and checked before anything is sent: it must report the given
-process id and have no open documents, so a session someone works in is never touched. The output
+process id and have no open documents except those named with --beside, so a session someone works
+in is never touched by accident. The export only closes the document it opened itself. The output
 is derived from a model and belongs in `exports/` (ignored by git).
 
 The session's generic code route runs on the web server's thread, where opening a document fails
@@ -81,6 +82,7 @@ def main():
     ap.add_argument("--timeout", type=int, default=3600)
     ap.add_argument("--code", help="run this script instead of the export")
     ap.add_argument("--opens-nothing", action="store_true", help="the script touches no document: run it next to open documents")
+    ap.add_argument("--beside", action="append", default=[], help="title of an open document that may stay open next to the export")
     ap.add_argument("file", nargs="?")
     ap.add_argument("out", nargs="?")
     a = ap.parse_args()
@@ -89,8 +91,9 @@ def main():
     if health.get("pid") != a.pid:
         raise SystemExit(f"port {a.port} belongs to process {health.get('pid')}, not {a.pid}")
     docs = call(a.port, "/codex_bridge/documents/").get("documents")
-    if docs and not (a.code and a.opens_nothing):
-        raise SystemExit(f"session has open documents, refusing: {[d.get('title') for d in docs]}")
+    others = [d.get("title") for d in docs or [] if d.get("title") not in a.beside]
+    if others and not (a.code and a.opens_nothing):
+        raise SystemExit(f"session has open documents, refusing: {others}")
 
     call(a.port, "/revit_mcp/execute_code/", {"code": BOOTSTRAP, "description": "register oracle route"})
     with open(a.code or os.path.join(HERE, "oracle_dump_revit.py"), encoding="utf-8") as f:

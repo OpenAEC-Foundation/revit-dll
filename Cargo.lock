@@ -375,6 +375,7 @@ dependencies = [
 name = "rvt-read"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "rvt-core",
  "rvt-model",
  "serde_json",

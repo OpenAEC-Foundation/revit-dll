@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use rvt_core::{decode_element, decode_global, inflated_stream, Cfb, Chain, Decoded, Element, EsField, EsSchema, EsSchemas, Node, Result, Schema, Value};
 use rvt_model::builtins::{builtin_category, builtin_parameter};
-use rvt_model::{ElementType, Family, ParamData, ParamValue, ParameterBinding, ParameterDef, ProjectInfo, SheetInfo, View};
+use rvt_model::{ContentDocument, ElementSummary, ElementType, Family, FamilyDefinition, FamilyTypeDefinition, ParamData, ParamValue, ParameterBinding, ParameterDef, ProjectInfo, ScheduleFieldInfo, ScheduleInfo, SheetInfo, View, ViewportInfo, Workset};
 use serde_json::{json, Map, Value as Json};
 
 use crate::Document;
@@ -33,6 +33,20 @@ pub(crate) struct Formats {
     pub es: EsSchemas,
     pub file: BTreeMap<String, String>,
     pub saved_by: Vec<String>,
+    pub owner_family: Option<i64>,
+    pub atom: Option<String>,
+    pub transmission: Option<String>,
+    pub preview: Option<Vec<u8>>,
+    /// `Global/ContentDocuments`, inflated.
+    content_documents: Option<Vec<u8>>,
+    /// `Global/ElemTable`: element -> partition (workset), created, last modified.
+    pub live: HashMap<i64, (i64, i64, i64)>,
+    pub worksets: Vec<Workset>,
+}
+
+/// `m_id` of a small wrapper such as `PartitionId` or a save counter.
+fn wrapped(n: &Node, field: &str) -> Option<i64> {
+    n.child(field)?.int("m_id")
 }
 
 fn guid_string(g: &[u8; 16]) -> String {
@@ -40,6 +54,31 @@ fn guid_string(g: &[u8; 16]) -> String {
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
         g[3], g[2], g[1], g[0], g[5], g[4], g[7], g[6], g[8], g[9], g[10], g[11], g[12], g[13], g[14], g[15]
     )
+}
+
+/// `RevitPreview4.0` wraps a PNG.
+fn preview_png(raw: &[u8]) -> Option<Vec<u8>> {
+    let start = crate::util::find(raw, &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a])?;
+    Some(raw[start..].to_vec())
+}
+
+/// `TransmissionData`: `u32 n | n x UTF-16` XML.
+fn transmission_xml(raw: &[u8]) -> Option<String> {
+    let n = rvt_core::le_u32(raw, 0).ok()? as usize;
+    let units: Vec<u16> = raw.get(4..4 + n.checked_mul(2)?)?.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    Some(String::from_utf16_lossy(&units))
+}
+
+/// `ProjectInformation` is a zip with one deflated XML file.
+fn zipped_xml(raw: &[u8]) -> Option<String> {
+    use std::io::Read;
+    if raw.get(..4)? != b"PK\x03\x04" || rvt_core::le_u16(raw, 8).ok()? != 8 {
+        return None;
+    }
+    let start = 30 + rvt_core::le_u16(raw, 26).ok()? as usize + rvt_core::le_u16(raw, 28).ok()? as usize;
+    let mut out = String::new();
+    flate2::read::DeflateDecoder::new(raw.get(start..)?).read_to_string(&mut out).ok()?;
+    Some(out)
 }
 
 /// `BasicFileInfo` ends in UTF-16 `key: value` lines, starting at "Worksharing:".
@@ -59,17 +98,68 @@ impl Formats {
     pub fn read(cfb: &Cfb) -> Option<Formats> {
         let schema = Schema::parse(&inflated_stream(cfb, "Formats/Latest").ok()?).ok()?;
         let file = cfb.stream("BasicFileInfo").map(|b| file_properties(&b)).unwrap_or_default();
-        let mut formats = Formats { schema, es: EsSchemas::default(), file, saved_by: Vec::new() };
+        let atom = cfb.stream("PartAtom").ok().map(|b| String::from_utf8_lossy(&b).into_owned()).or_else(|| zipped_xml(&cfb.stream("ProjectInformation").ok()?));
+        let mut formats = Formats {
+            schema,
+            es: EsSchemas::default(),
+            file,
+            saved_by: Vec::new(),
+            owner_family: None,
+            atom,
+            transmission: cfb.stream("TransmissionData").ok().and_then(|b| transmission_xml(&b)),
+            preview: cfb.stream("RevitPreview4.0").ok().and_then(|b| preview_png(&b)),
+            content_documents: inflated_stream(cfb, "Global/ContentDocuments").ok(),
+            live: HashMap::new(),
+            worksets: Vec::new(),
+        };
+        if let Some(d) = inflated_stream(cfb, "Global/ElemTable").ok().and_then(|raw| decode_global(&formats.schema, None, &raw).ok().map(|d| live_elements(&d))) {
+            formats.live = d;
+        }
+        if let Some(w) = inflated_stream(cfb, "Global/PartitionTable").ok().and_then(|raw| decode_global(&formats.schema, None, &raw).ok().map(|d| worksets(&d))) {
+            formats.worksets = w;
+        }
         if let Ok(raw) = inflated_stream(cfb, "Global/Latest") {
             if let Ok(d) = decode_global(&formats.schema, None, &raw) {
                 let saved_by = d.root().items("m_storedByRevitBuild").iter().filter_map(|n| n.str("m_str").map(String::from)).collect();
                 let es = es_schemas(&d);
+                let owner = d.root().id("m_ownerFamilyId").filter(|i| *i > 0);
+                formats.owner_family = owner;
                 formats.saved_by = saved_by;
                 formats.es = es;
             }
         }
         Some(formats)
     }
+}
+
+fn live_elements(d: &Decoded) -> HashMap<i64, (i64, i64, i64)> {
+    d.root()
+        .items("m_elemArr")
+        .iter()
+        .filter_map(|r| {
+            let id = r.id("m_id")?;
+            let history = r.child("m_history");
+            let date = |f: &str| history.as_ref().and_then(|h| wrapped(h, f)).unwrap_or(-1);
+            Some((id, (wrapped(r, "m_partitionId").unwrap_or(-1), date("m_creationDate"), date("m_lastModificationDate"))))
+        })
+        .collect()
+}
+
+fn worksets(d: &Decoded) -> Vec<Workset> {
+    d.root()
+        .items("m_set")
+        .iter()
+        .filter_map(|w| {
+            Some(Workset {
+                id: wrapped(w, "m_id")?,
+                name: w.str("m_name").unwrap_or_default().to_string(),
+                kind: w.int("m_type").unwrap_or(-1),
+                deleted: w.bool("m_deleted").unwrap_or(false),
+                created: wrapped(w, "m_creationDate"),
+                modified: wrapped(w, "m_lastModificationDate"),
+            })
+        })
+        .collect()
 }
 
 /// Extensible-storage schemas, kept in the document root's `ESSchemaStorage`.
@@ -130,6 +220,53 @@ fn val_json(d: &Decoded, v: &Value) -> Json {
     }
 }
 
+fn named_param(item: &Node) -> Option<(i64, &'static str, ParamData, bool)> {
+    let id = item.id("m_paramId")?;
+    let text = item.str("m_str").unwrap_or_default();
+    let (real, whole, elem) = (item.f64("m_value").unwrap_or(0.0), item.int("m_int").unwrap_or(0), item.id("m_elemId").unwrap_or(-1));
+    let value = if !text.is_empty() {
+        ParamData::Text(text.to_string())
+    } else if elem > 0 {
+        ParamData::Int(elem)
+    } else if real != 0.0 {
+        ParamData::Float(real)
+    } else {
+        ParamData::Int(whole)
+    };
+    Some((id, "Stored", value, item.ptr("m_oExpression").is_some()))
+}
+
+/// Name stored for an element: the field depends on the class.
+fn element_name(n: &Node) -> Option<String> {
+    let by_ptr = [("m_symbolInfo", "m_name"), ("m_pParamDef", "m_caption"), ("m_pCategory", "m_name"), ("m_pMaterial", "m_name"), ("m_pFillPattern", "m_name"), ("m_pLinePattern", "m_name"), ("m_pAppearanceAsset", "m_Name")];
+    for (holder, field) in by_ptr {
+        if let Some(s) = n.ptr(holder).and_then(|h| h.str(field).map(String::from)) {
+            return Some(s);
+        }
+    }
+    for field in ["m_viewName", "m_name", "m_sName", "m_text"] {
+        if let Some(s) = n.str(field) {
+            return Some(s.to_string());
+        }
+    }
+    None
+}
+
+/// Type stored for an element: the field depends on the class.
+fn element_type_id(n: &Node) -> Option<i64> {
+    ["m_masterSymbolId", "m_attrId", "m_styleSymbolId", "m_symbolId", "m_WallAttributesId", "m_floorAttributesId", "m_dbViewTypeId", "m_typeId"].iter().find_map(|f| n.id(f)).or_else(|| n.ptr("m_pInstanceInfo").and_then(|i| i.id("m_symbolId"))).or_else(|| n.ptr("m_cellList")?.items("m_cells").iter().find_map(|c| c.id("m_groupId")))
+}
+
+/// First GUID in an object, however deep it is wrapped.
+fn first_guid(n: &Node) -> Option<[u8; 16]> {
+    n.o.fields.iter().find_map(|(_, v)| match v {
+        Value::Guid(g) => Some(*g),
+        Value::Struct(o) => first_guid(&Node { d: n.d, o }),
+        Value::Ptr(i) => n.d.node(*i).and_then(|t| first_guid(&t)),
+        _ => None,
+    })
+}
+
 /// Values in `m_paramSet` of the four sets every element can have, then a family type's own table.
 fn stored_parameters(n: &Node) -> Vec<(i64, &'static str, ParamData, bool)> {
     let mut out = Vec::new();
@@ -147,23 +284,7 @@ fn stored_parameters(n: &Node) -> Vec<(i64, &'static str, ParamData, bool)> {
         }
     }
     if let Some(table) = n.ptr("m_pParams") {
-        for item in table.items("m_params") {
-            let Some(id) = item.id("m_paramId") else { continue };
-            let text = item.str("m_str").unwrap_or_default();
-            let (real, whole, elem) = (item.f64("m_value").unwrap_or(0.0), item.int("m_int").unwrap_or(0), item.id("m_elemId").unwrap_or(-1));
-            let value = if !text.is_empty() {
-                ParamData::Text(text.to_string())
-            } else if elem > 0 {
-                ParamData::Int(elem)
-            } else if real != 0.0 {
-                ParamData::Float(real)
-            } else if whole != 0 {
-                ParamData::Int(whole)
-            } else {
-                ParamData::Int(0)
-            };
-            out.push((id, "Stored", value, item.ptr("m_oExpression").is_some()));
-        }
+        out.extend(table.items("m_params").iter().filter_map(named_param));
     }
     out
 }
@@ -198,6 +319,21 @@ fn view_kind(class: &str, n: &Node, family_of_type: &HashMap<i64, i64>) -> Strin
 /// `DBViewType.m_systemFamilyIdx` of structural plans.
 const STRUCTURAL_PLAN_FAMILY: i64 = 120;
 
+/// `ScheduleSchema`: `m_pFields` holds the columns in order.
+fn schedule_info(s: &Node) -> ScheduleInfo {
+    let fields = s
+        .items("m_pFields")
+        .iter()
+        .map(|f| ScheduleFieldInfo {
+            parameter: f.id("m_paramElemId").unwrap_or(-1),
+            heading: f.str("m_columnHeading").unwrap_or_default().to_string(),
+            hidden: f.bool("m_hidden").unwrap_or(false),
+            width: f.f64("m_columnWidth").unwrap_or(0.0),
+        })
+        .collect();
+    ScheduleInfo { category: s.id("m_categoryId").unwrap_or(-1), itemized: s.bool("m_bInstanceSchedule").unwrap_or(false), fields }
+}
+
 /// Definitions of a fixed kind have no spec field.
 fn implied_spec(def_class: &str) -> Option<&'static str> {
     Some(match def_class {
@@ -206,6 +342,7 @@ fn implied_spec(def_class: &str) -> Option<&'static str> {
         "ParamDefInt" => "autodesk.spec:spec.int64-2.0.0",
         "ParamDefMaterialBrowse" => "autodesk.spec.aec:material-1.0.0",
         "ParamDefURL" => "autodesk.spec.string:url-2.0.0",
+        "ParamDefTextBrowseEdit" => "autodesk.spec.aec:multilineText-2.0.0",
         "ParamDefImageSymbolBrowseEdit" => "autodesk.spec.reference:image-1.0.0",
         _ => return None,
     })
@@ -222,9 +359,44 @@ impl Document {
         self.formats.as_ref().map(|f| &f.schema)
     }
 
-    /// Chain 0 of every partition: the project document. Other chains are embedded family documents.
+    /// The project document is in chain 0 of the partitions. A partition can hold records that are
+    /// no longer current: `Global/ElemTable` lists the live elements, and where several partitions
+    /// have a copy the highest partition number has the newest (established on few cases).
+    pub(crate) fn select_live_records(&mut self) {
+        let live = self.formats.as_ref().map(|f| &f.live).filter(|l| !l.is_empty());
+        let mut best: HashMap<u64, (u64, usize, usize)> = HashMap::new();
+        for (pi, p) in self.partitions.iter().enumerate() {
+            let number = p.stream.rsplit('/').next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            let Some(ch) = p.chains.first().filter(|c| c.id_bits.is_some()) else { continue };
+            for (ei, e) in ch.elements.iter().enumerate() {
+                if live.is_some_and(|l| !l.contains_key(&(e.id as i64))) {
+                    continue;
+                }
+                let slot = best.entry(e.id).or_insert((number, pi, ei));
+                if number >= slot.0 {
+                    *slot = (number, pi, ei);
+                }
+            }
+        }
+        let mut host: Vec<(u64, usize, usize)> = best.into_iter().map(|(id, (_, pi, ei))| (id, pi, ei)).collect();
+        host.sort_unstable();
+        for &(id, pi, ei) in &host {
+            self.index.insert(id, (pi, 0, ei));
+        }
+        self.host = host.into_iter().map(|(_, pi, ei)| (pi, ei)).collect();
+    }
+
+    /// Current records of the project document, by element id.
     fn host_elements(&self) -> impl Iterator<Item = (&Chain, &Element)> + '_ {
-        self.partitions.iter().filter_map(|p| p.chains.first().filter(|c| c.bits.is_some())).flat_map(|c| c.elements.iter().map(move |e| (c, e)))
+        self.host.iter().map(|&(pi, ei)| {
+            let c = &self.partitions[pi].chains[0];
+            (c, &c.elements[ei])
+        })
+    }
+
+    /// Worksets of the file.
+    pub fn worksets(&self) -> &[Workset] {
+        self.formats.as_ref().map_or(&[], |f| &f.worksets)
     }
 
     fn is_a(&self, e: &Element, base: u16) -> bool {
@@ -247,11 +419,14 @@ impl Document {
     /// (`m_unplacedOwnerId`): the elements the public API lists for the project.
     fn host_of<'a>(&'a self, base: &str) -> Vec<(&'a Element, Decoded<'a>)> {
         let mut all = self.host_all(base);
-        all.retain(|(_, d)| {
-            let n = d.root();
-            n.id("m_famId").unwrap_or(-1) == -1 && n.id("m_unplacedOwnerId").unwrap_or(-1) == -1
-        });
+        all.retain(|(_, d)| self.is_listed(&d.root()));
         all
+    }
+
+    /// In a family file its elements belong to the family that the file defines.
+    fn is_listed(&self, n: &Node) -> bool {
+        let fam = n.id("m_famId").unwrap_or(-1);
+        (fam == -1 || Some(fam) == self.formats.as_ref().and_then(|f| f.owner_family)) && n.id("m_unplacedOwnerId").unwrap_or(-1) == -1
     }
 
     /// Family types and other symbols; sub-types of a master type are internal.
@@ -292,12 +467,15 @@ impl Document {
     /// Decodes every element of the file: elements read to their last byte, and the failures per
     /// class with one message each.
     pub fn decode_check(&self) -> Json {
-        let (mut ok, mut failed) = (0usize, BTreeMap::<String, (usize, String)>::new());
+        let (mut ok, mut partial, mut failed) = (0usize, 0usize, BTreeMap::<String, (usize, String)>::new());
         for p in &self.partitions {
             for c in &p.chains {
                 for e in &c.elements {
                     match self.decode(c, e) {
-                        Some(Ok(_)) => ok += 1,
+                        Some(Ok(d)) => {
+                            ok += 1;
+                            partial += usize::from(!d.complete);
+                        }
                         Some(Err(err)) => {
                             let class = e.tag.and_then(|t| self.schema()?.class(t)).map_or("?".to_string(), |k| k.name.clone());
                             failed.entry(class).or_insert((0, err.to_string())).0 += 1;
@@ -307,7 +485,8 @@ impl Document {
                 }
             }
         }
-        json!({"decoded": ok, "failed": failed.values().map(|f| f.0).sum::<usize>(), "by_class": failed})
+        let unread: Vec<Json> = self.partitions.iter().flat_map(|p| p.unreadable.iter().map(move |(c, m)| json!({"stream": p.stream, "chain": c, "error": m}))).collect();
+        json!({"schema": self.schema().is_some(), "decoded": ok, "partial_unknown_storage": partial, "failed": failed.values().map(|f| f.0).sum::<usize>(), "by_class": failed, "unreadable_chains": unread})
     }
 
     /// The schema as JSON: classes with parent and field names.
@@ -334,21 +513,20 @@ impl Document {
             .collect()
     }
 
+    fn param_value(&self, (id, storage, value, formula): (i64, &'static str, ParamData, bool), names: &HashMap<i64, String>) -> ParamValue {
+        let builtin = builtin_parameter(id);
+        ParamValue {
+            id,
+            name: names.get(&id).cloned().or_else(|| builtin.and_then(|b| b.label.or(Some(b.name))).map(String::from)),
+            builtin: builtin.map(|b| b.name),
+            storage,
+            value,
+            formula,
+        }
+    }
+
     fn values(&self, n: &Node, names: &HashMap<i64, String>) -> Vec<ParamValue> {
-        stored_parameters(n)
-            .into_iter()
-            .map(|(id, storage, value, formula)| {
-                let builtin = builtin_parameter(id);
-                ParamValue {
-                    id,
-                    name: names.get(&id).cloned().or_else(|| builtin.and_then(|b| b.label.or(Some(b.name))).map(String::from)),
-                    builtin: builtin.map(|b| b.name),
-                    storage,
-                    value,
-                    formula,
-                }
-            })
-            .collect()
+        stored_parameters(n).into_iter().map(|t| self.param_value(t, names)).collect()
     }
 
     /// Parameter values stored for one element; an instance also shows its type's values that it
@@ -368,6 +546,113 @@ impl Document {
             }
         }
         out
+    }
+
+    fn named_values(&self, items: &[Node], names: &HashMap<i64, String>) -> Vec<ParamValue> {
+        items.iter().filter_map(named_param).map(|t| self.param_value(t, names)).collect()
+    }
+
+    /// The thumbnail stored in the file, as PNG.
+    pub fn preview(&self) -> Option<&[u8]> {
+        self.formats.as_ref()?.preview.as_deref()
+    }
+
+    /// Every element of the project document with what the file stores about it in general. Where
+    /// no name is stored the name comes from what the element refers to: its type, its category
+    /// (graphics styles), its owner (fonts) or its datum plane (sketch planes).
+    pub fn element_summaries(&self) -> Vec<ElementSummary> {
+        struct Row {
+            summary: ElementSummary,
+            category: Option<i64>,
+            owner: Option<i64>,
+            plane: Option<i64>,
+        }
+        let rows: Vec<Row> = self
+            .host_elements()
+            .filter_map(|(c, e)| {
+                let d = self.decode(c, e)?.ok()?;
+                let n = d.root();
+                if !self.is_listed(&n) {
+                    return None;
+                }
+                let table = self.formats.as_ref().and_then(|f| f.live.get(&(e.id as i64))).copied();
+                Some(Row {
+                    summary: ElementSummary {
+                        id: e.id,
+                        class: n.class().to_string(),
+                        category: e.cat,
+                        name: element_name(&n),
+                        type_id: element_type_id(&n),
+                        owner_view: n.id("m_ownerDBViewId"),
+                        phase_created: n.id("m_createdPhaseId"),
+                        phase_demolished: n.id("m_demolishedPhaseId"),
+                        design_option: n.id("m_designOptionId"),
+                        workset: table.map(|t| t.0),
+                        created: table.map(|t| t.1),
+                        modified: table.map(|t| t.2),
+                    },
+                    category: (n.class() == "GStyleElem").then(|| n.id("m_categoryId")).flatten(),
+                    owner: n.id("m_ownerId"),
+                    plane: n.child("m_oPlaneRef").and_then(|r| r.id("m_datumPlaneId")),
+                })
+            })
+            .collect();
+        let stored: HashMap<i64, String> = rows.iter().filter_map(|r| Some((r.summary.id as i64, r.summary.name.clone()?))).collect();
+        rows.into_iter()
+            .map(|r| {
+                let mut s = r.summary;
+                if s.name.is_none() {
+                    let category = r.category.and_then(|c| builtin_category(c).map(|b| b.label.unwrap_or(b.name).to_string()).or_else(|| stored.get(&c).cloned()));
+                    let linked = |i: Option<i64>| i.and_then(|i| stored.get(&i).cloned());
+                    s.name = category.or_else(|| linked(s.type_id)).or_else(|| linked(r.owner)).or_else(|| linked(r.plane));
+                }
+                s
+            })
+            .collect()
+    }
+
+    /// Embedded documents of the file (`Global/ContentDocuments`): marker, size, document, size.
+    pub fn content_documents(&self) -> Vec<ContentDocument> {
+        let Some(f) = self.formats.as_ref() else { return Vec::new() };
+        let Some(b) = f.content_documents.as_deref() else { return Vec::new() };
+        let mut out = Vec::new();
+        let mut o = 0usize;
+        while let Ok(tag) = rvt_core::le_u16(b, o) {
+            let Ok(marker) = rvt_core::decode(&f.schema, Some(&f.es), b, o + 2, tag) else { break };
+            let key = first_guid(&marker.root());
+            let element_count = marker.root().int("m_nElementCount").unwrap_or(0);
+            let Ok(size) = rvt_core::le_u32(b, marker.end) else { break };
+            if size == 0 {
+                break;
+            }
+            let start = marker.end + 4;
+            let owner_family = rvt_core::le_u16(b, start).ok().and_then(|t| rvt_core::decode(&f.schema, Some(&f.es), b, start + 2, t).ok()).and_then(|d| d.root().id("m_ownerFamilyId"));
+            let chain = key.and_then(|k| self.partitions.iter().find_map(|p| p.chains.iter().find(|c| c.key == Some(k)).map(|c| c.index)));
+            out.push(ContentDocument { key: key.map_or(String::new(), |k| guid_string(&k)), element_count, owner_family, chain });
+            o = start + size as usize + 4;
+        }
+        out
+    }
+
+    /// A family's definition. Without `id`: the family this file defines.
+    pub fn family_definition(&self, id: Option<u64>) -> Option<FamilyDefinition> {
+        let id = id.or_else(|| self.formats.as_ref()?.owner_family.map(|f| f as u64))?;
+        let names = self.parameter_names();
+        let d = self.decoded(id)?.ok()?;
+        let n = d.root();
+        let table = n.ptr("m_pFamilyTypes");
+        let types = table.map_or(Vec::new(), |t| {
+            t.items("m_pairs")
+                .iter()
+                .map(|p| FamilyTypeDefinition {
+                    name: p.str("name").unwrap_or_default().to_string(),
+                    parameters: p.child("params").map_or(Vec::new(), |q| self.named_values(&q.items("m_params"), &names)),
+                })
+                .collect()
+        });
+        let current = n.ptr("m_familyParams").map_or(Vec::new(), |q| self.named_values(&q.items("m_params"), &names));
+        let document_chain = self.content_documents().into_iter().find(|c| c.owner_family == Some(id as i64)).and_then(|c| c.chain);
+        Some(FamilyDefinition { id, name: n.str("m_name").unwrap_or_default().to_string(), category: n.id("m_categoryId").unwrap_or(-1), types, current, document_chain })
     }
 
     pub fn project_info(&self) -> Option<ProjectInfo> {
@@ -398,6 +683,13 @@ impl Document {
 
     pub fn views(&self) -> Vec<View> {
         let names = self.parameter_names();
+        let mut viewports: HashMap<i64, Vec<ViewportInfo>> = HashMap::new();
+        for (e, d) in self.host_of("Viewport") {
+            let n = d.root();
+            if let (Some(sheet), Some(view)) = (n.id("m_ownerDBViewId"), n.id("m_dbViewId")) {
+                viewports.entry(sheet).or_default().push(ViewportInfo { id: e.id, view, viewport_type: n.id("m_attrId").unwrap_or(-1), offset: n.xyz("m_offset") });
+            }
+        }
         let family_of_type: HashMap<i64, i64> = self.host_of("DBViewType").iter().filter_map(|(e, d)| Some((e.id as i64, d.root().int("m_systemFamilyIdx")?))).collect();
         self.host_of("DBView")
             .iter()
@@ -457,8 +749,10 @@ impl Document {
                             designed_by: s("m_designedBy"),
                             approved_by: s("m_approvedBy"),
                             issue_date: s("m_issueDate"),
+                            viewports: viewports.remove(&(e.id as i64)).unwrap_or_default(),
                         }
                     }),
+                    schedule: n.ptr("m_pSchema").map(|schema| schedule_info(&schema)),
                     parameters,
                 }
             })
@@ -549,6 +843,7 @@ impl Document {
                     group: forge("m_groupTypeId"),
                     visible: def.and_then(|x| x.bool("m_userVisible")),
                     guid,
+                    unit_type: def.and_then(|x| x.int("m_unitType")),
                     instance: n.bool("m_instanceParam"),
                     family: n.id("m_famId").filter(|f| *f != -1),
                 }

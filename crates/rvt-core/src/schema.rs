@@ -6,8 +6,10 @@
 //! ```text
 //! file  := { u16 0 | class } …  (a name length of 0 ends the list)
 //! class := u16 n | name | classref parent | u32 version | u32 nf | field × nf | u32 ng | guid × ng
+//!          (Revit 2012 and earlier end after the fields: no guid list)
 //! field := u32 n | name | type
 //! type  := u8 code | u8 flags | u16 extra | [u32 count if flags high nibble = 1] | kind
+//!          (extra bit 1: the field is not saved; it does not occur in bodies)
 //! classref := u16 id, and if bit 15 is set: u16 0 | class  (first use defines it inline)
 //! ```
 //!
@@ -56,6 +58,7 @@ pub enum Shape {
 pub struct Type {
     pub kind: Kind,
     pub shape: Shape,
+    pub saved: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +92,7 @@ pub struct Schema {
 struct Parser<'a> {
     b: &'a [u8],
     o: usize,
+    guid_lists: bool,
     next_id: u16,
     depth: usize,
     s: Schema,
@@ -135,7 +139,7 @@ impl Parser<'_> {
     fn type_(&mut self) -> Result<Type> {
         let code = self.u8()?;
         let flags = self.u8()?;
-        self.u16()?;
+        let extra = self.u16()?;
         let shape = match flags & 0xf0 {
             0x10 => Shape::Array(self.u32()?),
             0x50 => Shape::Vector,
@@ -159,7 +163,7 @@ impl Parser<'_> {
             }
             c => Kind::Prim(c),
         };
-        Ok(Type { kind, shape })
+        Ok(Type { kind, shape, saved: extra & 2 == 0 })
     }
 
     fn class_def(&mut self, name_len: usize, id: Option<u16>) -> Result<()> {
@@ -185,7 +189,7 @@ impl Parser<'_> {
             let fname = self.name(n)?;
             fields.push(Field { name: fname, ty: self.type_()? });
         }
-        let guids = self.u32()? as usize;
+        let guids = if self.guid_lists { self.u32()? as usize } else { 0 };
         self.o = self.o.checked_add(guids.saturating_mul(16)).filter(|e| *e <= self.b.len()).ok_or_else(|| Error::Format(format!("schema: {guids} guids past end in {name}")))?;
         let i = id as usize;
         if self.s.classes.len() <= i {
@@ -201,7 +205,11 @@ impl Parser<'_> {
 impl Schema {
     /// Parses inflated `Formats/Latest` bytes.
     pub fn parse(b: &[u8]) -> Result<Schema> {
-        let mut p = Parser { b, o: 0, next_id: FIRST_ID, depth: 0, s: Schema::default() };
+        Self::parse_layout(b, true).or_else(|e| Self::parse_layout(b, false).map_err(|_| e))
+    }
+
+    fn parse_layout(b: &[u8], guid_lists: bool) -> Result<Schema> {
+        let mut p = Parser { b, o: 0, guid_lists, next_id: FIRST_ID, depth: 0, s: Schema::default() };
         while p.o + 4 <= b.len() {
             if p.u16()? != 0 {
                 return Err(Error::Format(format!("schema: record prefix at {}", p.o - 2)));
@@ -235,8 +243,8 @@ impl Schema {
         self.element_id = self.id_of("ElementId");
         self.es_entity = self.id_of("ESEntity");
         self.id_width = self.id_of("Identifier").and_then(|i| self.class(i)).and_then(|c| match c.fields.as_slice() {
-            [Field { ty: Type { kind: Kind::Prim(CODE_I64), shape: Shape::One }, .. }] => Some(8),
-            [Field { ty: Type { kind: Kind::Prim(CODE_I32), shape: Shape::One }, .. }] => Some(4),
+            [Field { ty: Type { kind: Kind::Prim(CODE_I64), shape: Shape::One, .. }, .. }] => Some(8),
+            [Field { ty: Type { kind: Kind::Prim(CODE_I32), shape: Shape::One, .. }, .. }] => Some(4),
             _ => None,
         });
         Ok(())

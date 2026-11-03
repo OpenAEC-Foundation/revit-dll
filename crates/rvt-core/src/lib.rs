@@ -11,7 +11,7 @@ pub mod tags;
 mod tags_gen;
 
 pub use cfb::Cfb;
-pub use chain::{chains, section_a_b, strip_inserted, Chain, Element};
+pub use chain::{chains, section_a_b, section_a_b_with, strip_inserted, Chain, Element};
 pub use decode::{decode, decode_element, Decoded, EsField, EsSchema, EsSchemas, Node, Object, Value};
 pub use schema::Schema;
 pub use tags::vtag;
@@ -66,6 +66,7 @@ pub fn decode_global<'s>(s: &'s Schema, es: Option<&'s EsSchemas>, b: &[u8]) -> 
 
 /// Opens a file and parses every partition down to element tables.
 pub fn read_partitions(cfb: &Cfb) -> Result<Vec<Partition>> {
+    let id_width = inflated_stream(cfb, "Formats/Latest").ok().and_then(|b| Schema::parse(&b).ok()).and_then(|s| s.id_width);
     let mut out = Vec::new();
     for (path, entry) in cfb.paths() {
         if !path.starts_with("Partitions/") {
@@ -75,10 +76,11 @@ pub fn read_partitions(cfb: &Cfb) -> Result<Vec<Partition>> {
         let mut chs = chains(&raw)?;
         let mut unreadable = Vec::new();
         for ch in chs.iter_mut() {
-            if let Err(e) = section_a_b(ch) {
+            if let Err(e) = section_a_b_with(ch, id_width) {
                 // step 1448: an unreadable (mini) chain must not stop the whole export
                 ch.elements.clear();
                 ch.bits = None;
+                ch.id_bits = None;
                 unreadable.push((ch.index, e.to_string().chars().take(120).collect()));
             }
         }

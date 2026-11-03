@@ -39,6 +39,15 @@ pub struct DocumentInfo {
     pub saved_by: Vec<String>,
     /// Classes in the file's own schema.
     pub schema_classes: usize,
+    /// For a family file: the family this document defines.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_family: Option<i64>,
+    /// Stream `PartAtom` (families) or the XML in `ProjectInformation` (projects).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub atom: Option<String>,
+    /// Stream `TransmissionData`: external file references as XML.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transmission: Option<String>,
 }
 
 /// One layer of a compound structure (§25).
@@ -498,7 +507,36 @@ pub struct View {
     /// Sheets.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sheet: Option<SheetInfo>,
+    /// Schedules.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<ScheduleInfo>,
     pub parameters: Vec<ParamValue>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ScheduleInfo {
+    pub category: i64,
+    pub itemized: bool,
+    pub fields: Vec<ScheduleFieldInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ScheduleFieldInfo {
+    /// Built-in parameter (negative) or parameter element.
+    pub parameter: i64,
+    pub heading: String,
+    pub hidden: bool,
+    /// Column width on sheets, in feet.
+    pub width: f64,
+}
+
+/// A view placed on a sheet.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ViewportInfo {
+    pub id: u64,
+    pub view: i64,
+    pub viewport_type: i64,
+    pub offset: Option<[f64; 3]>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -510,6 +548,7 @@ pub struct SheetInfo {
     pub designed_by: String,
     pub approved_by: String,
     pub issue_date: String,
+    pub viewports: Vec<ViewportInfo>,
 }
 
 /// A loaded family.
@@ -562,6 +601,9 @@ pub struct ParameterDef {
     pub group: Option<String>,
     pub visible: Option<bool>,
     pub guid: Option<String>,
+    /// Files before Revit 2021 or so store a number where newer files have `spec`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit_type: Option<i64>,
     /// Family parameters: per instance, not per type.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instance: Option<bool>,
@@ -578,4 +620,67 @@ pub struct ParameterBinding {
     /// Name of the public API's class: "InstanceBinding" or "TypeBinding".
     pub binding: &'static str,
     pub categories: Vec<i64>,
+}
+
+/// One element in the project document, whatever its class. `name` and `type_id` are what the file
+/// stores; for some classes the public API composes a name that is not stored.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ElementSummary {
+    pub id: u64,
+    pub class: String,
+    pub category: i32,
+    pub name: Option<String>,
+    pub type_id: Option<i64>,
+    pub owner_view: Option<i64>,
+    pub phase_created: Option<i64>,
+    pub phase_demolished: Option<i64>,
+    pub design_option: Option<i64>,
+    /// Workset: id in `worksets`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workset: Option<i64>,
+    /// Save counters from the element table, comparable within the file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modified: Option<i64>,
+}
+
+/// A workset (`Global/PartitionTable`).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Workset {
+    pub id: i64,
+    pub name: String,
+    pub kind: i64,
+    pub deleted: bool,
+    pub created: Option<i64>,
+    pub modified: Option<i64>,
+}
+
+/// A family's own definition: its types with their values.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct FamilyDefinition {
+    pub id: u64,
+    pub name: String,
+    pub category: i64,
+    pub types: Vec<FamilyTypeDefinition>,
+    /// The family's current values.
+    pub current: Vec<ParamValue>,
+    /// Chain of the embedded family document, when the family is loaded in a project.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_chain: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct FamilyTypeDefinition {
+    pub name: String,
+    pub parameters: Vec<ParamValue>,
+}
+
+/// An embedded document of `Global/ContentDocuments`: normally a loaded family.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ContentDocument {
+    pub key: String,
+    pub element_count: i64,
+    pub owner_family: Option<i64>,
+    pub chain: Option<usize>,
 }

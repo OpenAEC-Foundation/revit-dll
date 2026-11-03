@@ -16,7 +16,10 @@ pub struct Chain {
     pub key: Option<[u8; 16]>,
     pub count: u32,
     pub data: Vec<u8>,
+    /// 32 or 64, only when the version is known too: the byte-level readers depend on both.
     pub bits: Option<u8>,
+    /// Element id width in bits, whether or not the version is known.
+    pub id_bits: Option<u8>,
     pub version: Option<u16>,
     pub elements: Vec<Element>,
     /// u16 @8 of the partition header; separates 2015 from 2016 (step 1510).
@@ -82,7 +85,7 @@ pub fn chains(raw: &[u8]) -> Result<Vec<Chain>> {
         // §1.3 Revit 2008: 8 bytes + one gzip member
         let mut data = Vec::new();
         flate2::read::GzDecoder::new(&raw[8..]).read_to_end(&mut data)?;
-        return Ok(vec![Chain { index: 0, key: None, count: u32::MAX, data, bits: None, version: None, elements: vec![], hdr: 0 }]);
+        return Ok(vec![Chain { index: 0, key: None, count: u32::MAX, data, bits: None, id_bits: None, version: None, elements: vec![], hdr: 0 }]);
     }
     // step 1338: 2014 has header 7; step 1476: 2018 header 8 (2016/2017 7, 2019 9)
     if !matches!(head, 7..=9) {
@@ -103,7 +106,7 @@ pub fn chains(raw: &[u8]) -> Result<Vec<Chain>> {
             len = le_u32(raw, h + 16)? as isize - 8;
             pos = h + 32;
         }
-        out.push(Chain { index: idx, key, count, data, bits: None, version: None, elements: vec![], hdr });
+        out.push(Chain { index: idx, key, count, data, bits: None, id_bits: None, version: None, elements: vec![], hdr });
         // marker = u16 (t+1) | ff×4 | u16 t (step 254); 220 bytes, or 78 in 2016/2017 (step 1481)
         let mut next = None;
         for gap in [220usize, 78] {
@@ -144,23 +147,34 @@ fn bbox_refs(b: &[u8], o: usize, ln: usize, s: usize) -> Result<(Option<[f64; 6]
 
 /// §3 / §3.6 section A and §4 / §4.3 section B; fills `ch.elements`, `ch.bits` and `ch.version`.
 pub fn section_a_b(ch: &mut Chain) -> Result<()> {
+    section_a_b_with(ch, None)
+}
+
+/// As [`section_a_b`], with the element id width in bytes from the file's schema: it decides the
+/// table layout where the version code is not known (before 2014, or newer than this reader).
+pub fn section_a_b_with(ch: &mut Chain, id_width: Option<u8>) -> Result<()> {
     let b = &ch.data;
     let mut elements = Vec::new();
     let (p0, idlen, ylen, step);
-    if let Some(v) = version32(le_u16(b, 8)?) {
+    let known32 = version32(le_u16(b, 8)?);
+    if id_width == Some(4) || (id_width.is_none() && known32.is_some()) {
         // 32-bit (2008, 2014–2023)
-        ch.bits = Some(32);
-        ch.version = Some(if v == 2016 && ch.hdr == 0x02DE { 2015 } else { v }); // step 1510
+        ch.id_bits = Some(32);
+        ch.bits = known32.map(|_| 32);
+        ch.version = known32.map(|v| if v == 2016 && ch.hdr == 0x02DE { 2015 } else { v }); // step 1510
         let mut o = 0usize;
         while b.get(o..o + 4).ok_or_else(|| Error::Format("section A overrun".into()))? != [0xff; 4] {
             let eid = le_u32(b, o)? as u64;
             let x = le_u32(b, o + 4)? as usize;
+            // workshared files: u16 @10 records of 14 bytes, as the 22-byte records in 64-bit tables
+            let s = 14 * le_u16(b, o + 10)? as usize;
+            let n = x + 12;
             let mut bb32 = None;
-            if x + 12 >= 108 {
+            if n >= 108 + s {
                 // step 1330: 32-bit section A bbox = 6 × f64 @60
                 let mut v = [0f64; 6];
                 for (i, t) in v.iter_mut().enumerate() {
-                    *t = le_f64(b, o + 60 + 8 * i)?;
+                    *t = le_f64(b, o + 60 + s + 8 * i)?;
                 }
                 if v.iter().all(|t| t.is_finite()) && (0..3).all(|i| v[i] <= v[i + 3]) && v.iter().all(|t| t.abs() < 1e9) {
                     bb32 = Some(v);
@@ -168,12 +182,12 @@ pub fn section_a_b(ch: &mut Chain) -> Result<()> {
             }
             elements.push(Element {
                 id: eid,
-                cat: le_i32(b, o + 14)?,
-                tag: if x + 12 >= 48 { Some(le_u16(b, o + 46)?) } else { None },
+                cat: le_i32(b, o + 14 + s)?,
+                tag: if n >= 48 + s { Some(le_u16(b, o + 46 + s)?) } else { None },
                 bbox: bb32,
                 refs: None,
-                view: if x + 12 >= 26 { Some(le_i32(b, o + 22)? as i64) } else { None },
-                owner32: if x + 12 >= 22 { Some(le_i32(b, o + 18)?) } else { None },
+                view: if n >= 26 + s { Some(le_i32(b, o + 22 + s)? as i64) } else { None },
+                owner32: if n >= 22 + s { Some(le_i32(b, o + 18 + s)?) } else { None },
                 body: (0, 0),
             });
             o += x + 12;
@@ -181,8 +195,9 @@ pub fn section_a_b(ch: &mut Chain) -> Result<()> {
         (p0, idlen, ylen, step) = (o + 12, 4usize, 8usize, 16usize);
     } else {
         // 64-bit (2024–2026)
-        ch.bits = Some(64);
+        ch.id_bits = Some(64);
         ch.version = version64(le_u16(b, 12)?);
+        ch.bits = (ch.version.is_some() || id_width.is_none()).then_some(64);
         let mut o = 0usize;
         while b.get(o..o + 8).ok_or_else(|| Error::Format("section A overrun".into()))? != [0xff; 8] {
             let eid = le_u64(b, o)?;
