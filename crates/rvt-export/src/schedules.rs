@@ -224,7 +224,11 @@ pub fn schedules(doc: &Document) -> Vec<Schedule> {
         .collect();
     let mut cx = Context::new(doc);
     for s in &mut out {
+        let t = std::time::Instant::now();
         compute(&mut cx, s);
+        if std::env::var_os("RVT_SCHEDULE_TIMING").is_some() {
+            eprintln!("schedule {:>7.2}s {} ({} rows)", t.elapsed().as_secs_f64(), s.name, s.rows.len());
+        }
     }
     out.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
     out
@@ -941,7 +945,7 @@ impl<'a> Context<'a> {
             return false;
         }
         let doc = self.doc;
-        *self.symbols.entry(id).or_insert_with(|| doc.object_root(id as u64).is_some_and(|o| o.is_a("Symbol")))
+        *self.symbols.entry(id).or_insert_with(|| doc.object_is_a(id as u64, "Symbol"))
     }
 
     /// The element's type: the first referenced element (root fields, then nested objects)

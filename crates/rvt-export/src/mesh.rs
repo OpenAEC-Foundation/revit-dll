@@ -1157,76 +1157,98 @@ fn saved_batches(doc: &Document, cands: Vec<SavedCand>, hidden: &std::collection
     // faces without a material (none on the face, none on its node styles, none on the category):
     // Revit's default material, not the batch's category colour (step 2317)
     let no_material = crate::props::Props::default_rgb(doc);
-    let n = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8);
-    let chunk = cands.len().div_ceil(n).max(1);
-    let parts: Vec<BTreeMap<&'static str, Batch>> = std::thread::scope(|sc| {
-        let jobs: Vec<_> = cands
-            .chunks(chunk)
-            .map(|part| {
+    let n = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 16);
+    // small blocks, taken in turn: elements differ widely in cost (a toposolid or a stair can take
+    // seconds), and fixed shares left one thread meshing for 33 s while another was done after 5 s
+    // (snowdon arch 2027, 8 threads); joined in block order, so the result does not change
+    const BLOCK: usize = 16;
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let (cands, next) = (&cands, &next);
+    let mut parts: Vec<(usize, BTreeMap<&'static str, Batch>)> = std::thread::scope(|sc| {
+        let jobs: Vec<_> = (0..n)
+            .map(|_| {
                 sc.spawn(move || {
                     let mut mesher = crate::saved::SavedMesher::new(sg).with_hidden(hidden.clone());
                     let mut props = crate::props::Props::new(doc);
-                    let mut saved: BTreeMap<&'static str, Batch> = BTreeMap::new();
-                    for c in part.iter().filter(|c| !c.hidden) {
-                        let b = saved.entry(c.name).or_insert_with(|| Batch::new(c.name, c.color));
-                        let found = mesher.element_mats(c.id).or_else(|| {
-                            crate::rebar::element(sg, c.id).map(|tris| crate::saved::Tris { mats: vec![-1; tris.len()], tris })
-                        });
-                        if let Some(t) = found {
-                            if std::env::var_os("RVT_MESH_SAVED_IDS").is_some() {
-                                let a: f64 = t.tris.iter().map(|t| norm(cross(sub(t[1], t[0]), sub(t[2], t[0]))) / 2.0).sum();
-                                eprintln!("saved element {} {} {:.2} ft2", c.id, c.name, a);
-                            }
-                            // the material colour per triangle, else Revit's default material
-                            // (step 2311, 2317)
-                            let base = no_material;
-                            let first = b.indices.len() as u32;
-                            for (tri, &m) in t.tris.iter().zip(&t.mats) {
-                                let before = b.positions.len();
-                                b.tri(tri[0], tri[1], tri[2]);
-                                if b.positions.len() > before {
-                                    let rgba = match props.material(m) {
-                                        Some(info) => {
-                                            let a = ((1.0 - info.transparency.clamp(0.0, 1.0)) * 255.0).round() as u8;
-                                            [info.rgb[0], info.rgb[1], info.rgb[2], a]
+                    let mut blocks = Vec::new();
+                    let (mut t_mesh, mut t_props, mut t_json) = (std::time::Duration::ZERO, std::time::Duration::ZERO, std::time::Duration::ZERO);
+                    loop {
+                        let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(part) = cands.get(k * BLOCK..).filter(|p| !p.is_empty()) else { break };
+                        let part = &part[..part.len().min(BLOCK)];
+                        let mut saved: BTreeMap<&'static str, Batch> = BTreeMap::new();
+                        for c in part.iter().filter(|c| !c.hidden) {
+                            let b = saved.entry(c.name).or_insert_with(|| Batch::new(c.name, c.color));
+                            let t0 = std::time::Instant::now();
+                            let found = mesher.element_mats(c.id).or_else(|| {
+                                crate::rebar::element(sg, c.id).map(|tris| crate::saved::Tris { mats: vec![-1; tris.len()], tris })
+                            });
+                            t_mesh += t0.elapsed();
+                            let t0 = std::time::Instant::now();
+                            if let Some(t) = found {
+                                if std::env::var_os("RVT_MESH_SAVED_IDS").is_some() {
+                                    let a: f64 = t.tris.iter().map(|t| norm(cross(sub(t[1], t[0]), sub(t[2], t[0]))) / 2.0).sum();
+                                    eprintln!("saved element {} {} {:.2} ft2", c.id, c.name, a);
+                                }
+                                // the material colour per triangle, else Revit's default material
+                                // (step 2311, 2317)
+                                let base = no_material;
+                                let first = b.indices.len() as u32;
+                                for (tri, &m) in t.tris.iter().zip(&t.mats) {
+                                    let before = b.positions.len();
+                                    b.tri(tri[0], tri[1], tri[2]);
+                                    if b.positions.len() > before {
+                                        let rgba = match props.material(m) {
+                                            Some(info) => {
+                                                let a = ((1.0 - info.transparency.clamp(0.0, 1.0)) * 255.0).round() as u8;
+                                                [info.rgb[0], info.rgb[1], info.rgb[2], a]
+                                            }
+                                            None => [base[0], base[1], base[2], 255],
+                                        };
+                                        for _ in 0..3 {
+                                            b.colors.extend_from_slice(&rgba);
                                         }
-                                        None => [base[0], base[1], base[2], 255],
-                                    };
-                                    for _ in 0..3 {
-                                        b.colors.extend_from_slice(&rgba);
                                     }
                                 }
-                            }
-                            if std::env::var_os("RVT_MESH_MATS").is_some() {
-                                let mut by: BTreeMap<i64, usize> = BTreeMap::new();
-                                for &m in &t.mats {
-                                    *by.entry(m).or_default() += 1;
+                                if std::env::var_os("RVT_MESH_MATS").is_some() {
+                                    let mut by: BTreeMap<i64, usize> = BTreeMap::new();
+                                    for &m in &t.mats {
+                                        *by.entry(m).or_default() += 1;
+                                    }
+                                    let s: Vec<String> = by
+                                        .iter()
+                                        .map(|(m, n)| match props.material(*m) {
+                                            Some(i) => format!("{m}:{n}:{}:{:?}:{:.2}", i.name, i.rgb, i.transparency),
+                                            None => format!("{m}:{n}:-"),
+                                        })
+                                        .collect();
+                                    eprintln!("mats {} {} {}", c.id, c.name, s.join(" | "));
                                 }
-                                let s: Vec<String> = by
-                                    .iter()
-                                    .map(|(m, n)| match props.material(*m) {
-                                        Some(i) => format!("{m}:{n}:{}:{:?}:{:.2}", i.name, i.rgb, i.transparency),
-                                        None => format!("{m}:{n}:-"),
-                                    })
-                                    .collect();
-                                eprintln!("mats {} {} {}", c.id, c.name, s.join(" | "));
-                            }
-                            let count = b.indices.len() as u32 - first;
-                            if count > 0 {
-                                b.elements.push((c.id, first, count));
-                                let json = props.element_json(c.id, c.name, &t.mats);
-                                b.props.push((c.id, json));
+                                let count = b.indices.len() as u32 - first;
+                                t_props += t0.elapsed();
+                                let t0 = std::time::Instant::now();
+                                if count > 0 {
+                                    b.elements.push((c.id, first, count));
+                                    let json = props.element_json(c.id, c.name, &t.mats);
+                                    b.props.push((c.id, json));
+                                }
+                                t_json += t0.elapsed();
                             }
                         }
+                        blocks.push((k, saved));
                     }
-                    saved
+                    if std::env::var_os("RVT_MESH_TIMING").is_some() {
+                        eprintln!("saved thread: mesh {:.2}s (decode {:.2}s), colours {:.2}s, properties {:.2}s", t_mesh.as_secs_f64(), mesher.decode_time.as_secs_f64(), t_props.as_secs_f64(), t_json.as_secs_f64());
+                    }
+                    blocks
                 })
             })
             .collect();
-        jobs.into_iter().filter_map(|j| j.join().ok()).collect()
+        jobs.into_iter().filter_map(|j| j.join().ok()).flatten().collect()
     });
+    parts.sort_unstable_by_key(|p| p.0);
     let mut saved: BTreeMap<&'static str, Batch> = BTreeMap::new();
-    for part in parts {
+    for (_, part) in parts {
         for (name, b) in part {
             match saved.get_mut(name) {
                 Some(acc) => {
@@ -1350,6 +1372,9 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
             eprintln!("mesh timing {:>8.2}s after {what}", t_mesh.elapsed().as_secs_f64());
         }
     };
+    // read on its own thread from the start (4.5 s for snowdon arch 2027, beside the 6.5 s of
+    // reading saved graphics below)
+    let param_assoc_job = sc.spawn(|| doc.family_param_associations());
     let mut group_defs = doc.group_definition_ids();
     // Step 2260: demolished elements (Phase Demolished set) are not shown in a {3D} view of the last
     // phase with 'Show Complete' (snowdon arch 2025: 6 legend floors, created = demolished = 'Legends';
@@ -2659,8 +2684,9 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
     // that parameter is 0 for the type: the symbol's value (matched by parameter name), else the
     // family's current value (snowdon door family 439: 'Masonry Frame' 1 / 'Dry Wall Frame' 0,
     // two frame sweeps; Revit draws one).
-    let vis_assoc: std::collections::HashMap<u64, u64> = doc
-        .family_param_associations()
+    let vis_assoc: std::collections::HashMap<u64, u64> = param_assoc_job
+        .join()
+        .unwrap_or_default()
         .into_iter()
         .filter_map(|(id, l)| l.iter().find(|(b, _)| *b == -1006205).map(|(_, f)| (id, *f)))
         .collect();

@@ -209,6 +209,12 @@ impl Document {
         self.object_store()?.root_view(id)
     }
 
+    /// Par C: whether an element's object record has class `class` or one deriving from it, read
+    /// from the record's root class tag alone (`object(id)?.is_a(class)` decodes the whole record).
+    pub fn object_is_a(&self, id: u64, class: &str) -> bool {
+        self.object_store().is_some_and(|s| s.is_a(id, class))
+    }
+
     /// Par C: ids (ascending) of the elements whose class is `class` or derives from it
     /// (e.g. `VWall` gives straight and arc walls, `Element` every element).
     pub fn object_ids_of_class(&self, class: &str) -> Vec<u64> {

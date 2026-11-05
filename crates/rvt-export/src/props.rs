@@ -27,11 +27,13 @@ pub struct Props<'a> {
     doc: &'a Document,
     materials: HashMap<i64, Option<MaterialInfo>>,
     names: HashMap<i64, Option<(String, String)>>,
+    /// family name per type (empty: a system type)
+    families: HashMap<i64, String>,
 }
 
 impl<'a> Props<'a> {
     pub fn new(doc: &'a Document) -> Self {
-        Props { doc, materials: HashMap::new(), names: HashMap::new() }
+        Props { doc, materials: HashMap::new(), names: HashMap::new(), families: HashMap::new() }
     }
 
     /// The material with this id, if it is one and has a colour.
@@ -109,14 +111,21 @@ impl<'a> Props<'a> {
             if let Some(t) = self.type_of(&o) {
                 if let Some((class, name)) = self.named(t) {
                     out.push(("type", name));
-                    let family = self
-                        .doc
-                        .object(t as u64)
-                        .and_then(|to| to.get("m_familyId").and_then(|v| v.element()))
-                        .and_then(|f| self.named(f))
-                        .map(|f| f.1)
-                        .filter(|f| !f.is_empty());
-                    out.push(("family", family.unwrap_or_else(|| system_family(&class))));
+                    let family = match self.families.get(&t) {
+                        Some(f) => f.clone(),
+                        None => {
+                            let f = self
+                                .doc
+                                .object(t as u64)
+                                .and_then(|to| to.get("m_familyId").and_then(|v| v.element()))
+                                .and_then(|f| self.named(f))
+                                .map(|f| f.1)
+                                .unwrap_or_default();
+                            self.families.insert(t, f.clone());
+                            f
+                        }
+                    };
+                    out.push(("family", if family.is_empty() { system_family(&class) } else { family }));
                 }
             }
         }
@@ -139,7 +148,8 @@ impl<'a> Props<'a> {
     }
 
     /// The first referenced element (root fields, then nested objects) whose class derives from
-    /// `Symbol`.
+    /// `Symbol` (its record's class tag only: decoding every referenced element took most of the
+    /// time of opening a model, snowdon arch 2027 30 s per meshing thread).
     fn type_of(&self, o: &ObjectView) -> Option<i64> {
         let mut ids: Vec<i64> = Vec::new();
         for f in &o.fields {
@@ -150,9 +160,7 @@ impl<'a> Props<'a> {
                 collect_elements(&f.value, &mut ids);
             }
         }
-        ids.into_iter().filter(|&i| i > 0 && i as u64 != o.id).find(|&i| {
-            self.doc.object(i as u64).is_some_and(|t| t.is_a("Symbol"))
-        })
+        ids.into_iter().filter(|&i| i > 0 && i as u64 != o.id).find(|&i| self.doc.object_is_a(i as u64, "Symbol"))
     }
 }
 

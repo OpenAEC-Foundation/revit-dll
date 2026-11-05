@@ -115,6 +115,11 @@ impl ObjectStore {
         self.schema.class(tag).map(|c| c.name.as_str())
     }
 
+    /// Whether an element's object record has class `name` or one deriving from it.
+    pub fn is_a(&self, id: u64, name: &str) -> bool {
+        self.records.get(&id).and_then(|b| root_tag(b)).is_some_and(|t| self.schema.is_a(t, name))
+    }
+
     /// Root class → number of object records.
     pub fn classes(&self) -> BTreeMap<String, usize> {
         let mut out = BTreeMap::new();
