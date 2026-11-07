@@ -1310,6 +1310,22 @@ fn saved_batch(cat: i32) -> Option<(&'static str, [f32; 3], bool)> {
     })
 }
 
+/// Whether the instance reader builds a family instance of category `cat`: not when saved graphics
+/// replace its batch (step 2306; nor are its families read then), the batch it would go in or the
+/// one the saved graphics put it in. An in-place family of a roof, floor or stair category is a
+/// family instance the saved graphics draw with the roofs, floors or stairs; built again among the
+/// other family instances, without a family document of its own, it became its stored box (3277
+/// constructie: six in-place roofs and two floors, mostly voids cutting the roofs, Revit draws
+/// nothing of them; grey blocks up to 19 × 3 × 4.5 m over the roofs).
+fn builds_instance(cat: i32, replaced: &std::collections::HashSet<&'static str>) -> bool {
+    let batch = match cat {
+        -2001360 => "Planting",
+        -2001370 => "Entourage",
+        c => instance_batch(c).0,
+    };
+    !replaced.contains(batch) && saved_batch(cat).is_none_or(|(saved, ..)| !replaced.contains(saved))
+}
+
 /// Shared nested family instances (`FamilyInstance::m_superInstanceId` set) that are not in their
 /// super instance's `m_subInstTable` any more: stale records with saved graphics of their own
 /// (open-research step 2316; Storax lamellengevels 11121102.., super instance 11121101 lists
@@ -2693,13 +2709,8 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
     }
 
     tick("railings");
-    // step 2306: instances whose batch saved graphics replace are not built (nor their families read)
-    let inst_batch = |cat: i32| match cat {
-        -2001360 => "Planting",
-        -2001370 => "Entourage",
-        c => instance_batch(c).0,
-    };
-    let need_inst = insts_all.iter().any(|i| want(inst_batch(i.cat)));
+    let built = |cat: i32| builds_instance(cat, &replaced);
+    let need_inst = insts_all.iter().any(|i| built(i.cat));
     let insts: &[Instance] = &insts_all;
     // Family geometry (§8.11, steps 2214–2216): extrusion solids of the instance's family, used when
     // they cover the element's stored box (±0.15 ft); otherwise the box itself.
@@ -3123,7 +3134,7 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
         }
     };
     tick("family precompute");
-    'inst: for i in insts.iter().filter(|i| i.scale.is_none() && i.origin.is_some() && want(inst_batch(i.cat))) {
+    'inst: for i in insts.iter().filter(|i| i.scale.is_none() && i.origin.is_some() && built(i.cat)) {
         if dbg_inst {
             if let Some(pv) = prev_inst.take() {
                 report(&batches, &pv);
@@ -3960,4 +3971,24 @@ pub fn encode(scene: &Scene) -> Vec<u8> {
         b.extend_from_slice(&z.to_le_bytes());
     }
     b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_in_place_family_saved_graphics_draw_is_not_built_again() {
+        // saved graphics replace the roofs and floors, not the other family instances
+        let replaced: std::collections::HashSet<&'static str> = ["Roofs", "Floors", "Stairs"].into_iter().collect();
+        // in-place roofs, floors and stairs: family instances of those categories, drawn (or, all
+        // voids, left out) by the saved graphics with the roofs, floors and stairs
+        for cat in [-2000035, -2000032, -2000120] {
+            assert!(!builds_instance(cat, &replaced), "category {cat}");
+        }
+        // generic models, whose batch saved graphics do not replace here, are still built
+        assert!(builds_instance(-2000151, &replaced));
+        // without saved graphics every instance is built
+        assert!(builds_instance(-2000035, &Default::default()));
+    }
 }
