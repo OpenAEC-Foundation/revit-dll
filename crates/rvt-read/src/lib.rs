@@ -80,6 +80,11 @@ pub struct Document {
     source: Option<Cfb>,
     /// Par C: object records (channel 102) and element headers (channel 101) with the schema.
     objects: std::sync::OnceLock<Option<objects::ObjectStore>>,
+    /// Readers the scene calls several times and that take seconds on a large file (family chains
+    /// 4.7 s, type values 2 s, parameter names 1 s on a 87 MB model): worked out once.
+    family_chains: std::sync::OnceLock<std::collections::BTreeMap<u64, (String, usize)>>,
+    type_values: std::sync::OnceLock<Vec<(String, usize, std::collections::BTreeMap<u64, rvt_model::ValueSet>)>>,
+    global_names: std::sync::OnceLock<HashMap<u64, Option<String>>>,
 }
 
 /// Revit's own saved graphics (open-research, steps 2300–2303): the file's schema and the
@@ -315,6 +320,9 @@ impl Document {
             saved: std::sync::OnceLock::new(),
             source: None,
             objects: std::sync::OnceLock::new(),
+            family_chains: std::sync::OnceLock::new(),
+            type_values: std::sync::OnceLock::new(),
+            global_names: std::sync::OnceLock::new(),
         };
         doc.rail_types = railings::rail_types(doc.partitions.iter().flat_map(|p| p.chains.iter()));
         let mut systems: Vec<MepSystem> = Vec::new();
@@ -990,6 +998,10 @@ impl Document {
     /// Step 2263: parameters of chain 0 of every partition count (snowdon arch 2025: a project over
     /// Partitions/122 and /124; family parameters in /122, symbols in /124).
     pub fn type_values_by_chain(&self) -> Vec<(String, usize, std::collections::BTreeMap<u64, rvt_model::ValueSet>)> {
+        self.type_values.get_or_init(|| self.read_type_values()).clone()
+    }
+
+    fn read_type_values(&self) -> Vec<(String, usize, std::collections::BTreeMap<u64, rvt_model::ValueSet>)> {
         let global: HashSet<u64> = self
             .partitions
             .iter()
@@ -1009,11 +1021,15 @@ impl Document {
     /// Step 2264: parameter names of chain 0 of every partition (a project can be spread over
     /// partitions, step 2263).
     pub fn parameter_names_global(&self) -> HashMap<u64, Option<String>> {
-        self.partitions
-            .iter()
-            .filter_map(|p| p.chains.first().filter(|c| c.bits.is_some()))
-            .flat_map(params::parameter_names)
-            .collect()
+        self.global_names
+            .get_or_init(|| {
+                self.partitions
+                    .iter()
+                    .filter_map(|p| p.chains.first().filter(|c| c.bits.is_some()))
+                    .flat_map(params::parameter_names)
+                    .collect()
+            })
+            .clone()
     }
 
     /// Parameter names (§9.1) of a chain, by ParameterElement id.
@@ -1118,10 +1134,14 @@ impl Document {
     /// Family id -> (partition stream, chain index) of the chain holding the family's own
     /// document (step 492; reference `catalog.family_chains`).
     pub fn family_chains(&self) -> std::collections::BTreeMap<u64, (String, usize)> {
-        families::family_chains(&self.partitions)
-            .into_iter()
-            .map(|(f, (q, xi))| (f, (self.partitions[q].stream.clone(), self.partitions[q].chains[xi].index)))
-            .collect()
+        self.family_chains
+            .get_or_init(|| {
+                families::family_chains(&self.partitions)
+                    .into_iter()
+                    .map(|(f, (q, xi))| (f, (self.partitions[q].stream.clone(), self.partitions[q].chains[xi].index)))
+                    .collect()
+            })
+            .clone()
     }
 
     /// Step 2246 (§10): family id -> document chain for families nested in family documents.
