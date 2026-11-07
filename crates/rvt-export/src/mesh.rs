@@ -1355,6 +1355,70 @@ fn segment_batch(cat: Option<i32>) -> (&'static str, [f32; 3]) {
     }
 }
 
+/// The triangles of a plan triangulation (a terrain) in a grid of their plan boxes, to find the
+/// triangles that can hold a point without testing every one (step 2234: the rim points of a
+/// building pad, every foot along its outline, each looked up in a terrain of 80 000 triangles).
+/// Each cell lists its triangles in order, so the first one of a cell that holds the point is the
+/// first of all.
+struct TriGrid {
+    min: [f64; 2],
+    cell: f64,
+    nx: usize,
+    ny: usize,
+    cells: Vec<Vec<u32>>,
+}
+
+impl TriGrid {
+    /// How far outside its plan box a triangle can still hold a point (its barycentric tolerance
+    /// of 1e-9, on triangles of up to a few kilometres).
+    const SLACK: f64 = 1e-4;
+
+    fn new(points: &[P3], triangles: &[usize]) -> Self {
+        let (mut min, mut max) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+        for p in triangles.iter().map(|&k| points[k]) {
+            for a in 0..2 {
+                min[a] = min[a].min(p[a]);
+                max[a] = max[a].max(p[a]);
+            }
+        }
+        let n = triangles.len() / 3;
+        let side = ((n as f64).sqrt().ceil() as usize).clamp(1, 1024);
+        let cell = ((max[0] - min[0]).max(max[1] - min[1]) / side as f64).max(1e-6);
+        let span = |a: usize| (((max[a] - min[a]) / cell).floor() as usize + 1).min(4096);
+        let (nx, ny) = if n == 0 { (0, 0) } else { (span(0), span(1)) };
+        let mut grid = Self { min, cell, nx, ny, cells: vec![Vec::new(); nx * ny] };
+        for (k, c) in triangles.chunks_exact(3).enumerate() {
+            let (lo, hi) = c.iter().map(|&i| points[i]).fold(([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]), |(l, h), p| {
+                ([l[0].min(p[0]), l[1].min(p[1])], [h[0].max(p[0]), h[1].max(p[1])])
+            });
+            let (x0, y0) = grid.index(lo[0] - Self::SLACK, lo[1] - Self::SLACK);
+            let (x1, y1) = grid.index(hi[0] + Self::SLACK, hi[1] + Self::SLACK);
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    grid.cells[y * nx + x].push(k as u32);
+                }
+            }
+        }
+        grid
+    }
+
+    /// The cell of a plan point, clamped to the grid.
+    fn index(&self, x: f64, y: f64) -> (usize, usize) {
+        let at = |v: f64, lo: f64, n: usize| (((v - lo) / self.cell).floor().max(0.0) as usize).min(n.saturating_sub(1));
+        (at(x, self.min[0], self.nx), at(y, self.min[1], self.ny))
+    }
+
+    /// The triangles that can hold plan point (x, y), in order.
+    fn at(&self, x: f64, y: f64) -> &[u32] {
+        let outside = |v: f64, lo: f64, n: usize| v < lo - Self::SLACK || v > lo + n as f64 * self.cell + Self::SLACK;
+        if self.nx == 0 || outside(x, self.min[0], self.nx) || outside(y, self.min[1], self.ny) {
+            return &[];
+        }
+        let (ix, iy) = self.index(x, y);
+        &self.cells[iy * self.nx + ix]
+    }
+}
+
 /// Builds the viewer scene of a document.
 pub fn scene(doc: &Document) -> Scene {
     std::thread::scope(|sc| scene_in(doc, sc))
@@ -1375,6 +1439,14 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
     // read on its own thread from the start (4.5 s for snowdon arch 2027, beside the 6.5 s of
     // reading saved graphics below)
     let param_assoc_job = sc.spawn(|| doc.family_param_associations());
+    // the readers that take seconds on a large file, also on threads of their own from the start:
+    // the document keeps the family chains, type values and parameter names, which the steps below
+    // ask for up to five times; the topography is handed over at its step (Example File Location
+    // Analysis, 87 MB, with the faster topography scan: scene 48 s before, 8 s after)
+    let topography_job = sc.spawn(|| doc.topography());
+    sc.spawn(|| drop(doc.family_chains()));
+    sc.spawn(|| drop(doc.type_values_by_chain()));
+    sc.spawn(|| drop(doc.parameter_names_global()));
     let mut group_defs = doc.group_definition_ids();
     // Step 2260: demolished elements (Phase Demolished set) are not shown in a {3D} view of the last
     // phase with 'Show Complete' (snowdon arch 2025: 6 legend floors, created = demolished = 'Legends';
@@ -2235,14 +2307,18 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
         })
         .collect();
     let cut_surfaces: std::collections::HashSet<i64> = pads.iter().filter_map(|(p, ..)| p.cut_surface).collect();
-    for t in doc.topography().into_iter().filter(|t| !hidden.contains(&t.id) && !cut_surfaces.contains(&(t.id as i64))) {
+    let topography = topography_job.join().unwrap_or_default();
+    for t in topography.into_iter().filter(|t| !hidden.contains(&t.id) && !cut_surfaces.contains(&(t.id as i64))) {
         let base = delaunator::triangulate(&t.points.iter().map(|p| delaunator::Point { x: p[0], y: p[1] }).collect::<Vec<_>>());
         if base.triangles.is_empty() {
             continue;
         }
-        // terrain height in plan from the plain triangulation
+        // terrain height in plan from the plain triangulation: the first triangle (in order) that
+        // holds the point, among the triangles of its cell in a grid (built when a pad asks)
+        let grid: std::cell::OnceCell<TriGrid> = std::cell::OnceCell::new();
         let z_at = |x: f64, y: f64| -> Option<f64> {
-            base.triangles.chunks_exact(3).find_map(|c| {
+            let cell = grid.get_or_init(|| TriGrid::new(&t.points, &base.triangles)).at(x, y);
+            cell.iter().map(|&k| &base.triangles[3 * k as usize..3 * k as usize + 3]).find_map(|c| {
                 let (a, b, c) = (t.points[c[0]], t.points[c[1]], t.points[c[2]]);
                 let d = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]);
                 if d.abs() < 1e-12 {
