@@ -322,8 +322,14 @@ fn env_flag(k: usize) -> bool {
 /// (−2001121, off by default), and the insulation/lining copies inside MEP fittings and curves
 /// (duct fitting −2008067/−2008068, pipe fitting −2008073, duct −2008063/−2008064, flex duct
 /// −2008065, pipe −2008070, flex pipe −2008071; separate insulation elements show them; rme 2026
-/// duct fittings were three times the Revit area).
-const HIDDEN_CATEGORIES: &[i64] = &[-2001121, -2008067, -2008068, -2008073, -2008063, -2008064, -2008065, -2008070, -2008071];
+/// duct fittings were three times the Revit area). Also cutting geometry (−2000074,
+/// OST_IOSCuttingGeometry): the void forms of a family instance, which cut its host and are never
+/// drawn themselves (3277 constructie: 73 generic models whose only geometry is 15 slots of
+/// 20 × 5 mm × 10 m each, voids that cut the facade into boards, drawn as grey slats; issue #24).
+const HIDDEN_CATEGORIES: &[i64] = &[-2001121, -2008067, -2008068, -2008073, -2008063, -2008064, -2008065, -2008070, -2008071, CUTTING_GEOMETRY];
+
+/// The category of void forms in a family's saved graphics (OST_IOSCuttingGeometry).
+const CUTTING_GEOMETRY: i64 = -2000074;
 
 /// `GInfo.m_flags` visibility class (1 and 3: not drawn).
 fn visibility(flags: u64) -> u8 {
