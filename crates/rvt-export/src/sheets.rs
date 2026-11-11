@@ -7,7 +7,7 @@
 //! - every view has a `DBDrawing` with `m_viewports`; each `Viewport` joins a view
 //!   (`m_dbViewId`) to a drawing (`m_dbDrawingId`). The first viewport of a sheet's drawing is
 //!   the sheet itself (position 0); the others are the placed views with `m_viewPosition.m_xyz`
-//!   (sheet feet), `m_scale` (sheet / model, 0.05 = 1:20), `m_detailNumber` and
+//!   (`m_offset` in files before 2025; sheet feet), `m_scale` (sheet / model, 0.05 = 1:20), `m_detailNumber` and
 //!   `m_labelOrigin`;
 //! - the position is where the origin of the view's crop frame (its local 0, 0) lands on the
 //!   sheet, so the box is `position + crop min…max × scale`. Not the box centre: 3077 R26 'BP-21'
@@ -116,7 +116,9 @@ fn viewport(doc: &Document, id: u64, sheet: u64, views: &HashMap<u64, ViewInfo>)
         return None;
     }
     let info = views.get(&view);
-    let position = vec3(o.path(&["m_viewPosition", "m_xyz"]))?;
+    // files before 2025 have no `m_viewPosition`; their `m_offset` holds the same point (3070 R26
+    // stores both, equal on all its viewports)
+    let position = vec3(o.path(&["m_viewPosition", "m_xyz"])).or_else(|| vec3(o.get("m_offset")))?;
     let scale = o.get("m_scale").and_then(|v| v.as_f64()).filter(|s| s.is_finite() && *s > 0.0).unwrap_or(1.0);
     // an inactive crop box keeps Revit's default extents (3077 R26: 61 m squares), no box
     let rect = info
