@@ -1460,6 +1460,9 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
     // ask for up to five times; the topography is handed over at its step (Example File Location
     // Analysis, 87 MB, with the faster topography scan: scene 48 s before, 8 s after)
     let topography_job = sc.spawn(|| doc.topography());
+    // the family instances too: the slowest reader of a large project (2044 R24, 1.1 million
+    // elements: 45 s), and nothing before its step waits for it
+    let instances_job = sc.spawn(|| doc.instances());
     sc.spawn(|| drop(doc.family_chains()));
     sc.spawn(|| drop(doc.type_values_by_chain()));
     sc.spawn(|| drop(doc.parameter_names_global()));
@@ -1526,7 +1529,7 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
     let insts_all: Vec<Instance> = {
         let mut by_id: Vec<Instance> = Vec::new();
         let mut at: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
-        for i in doc.instances().into_iter().filter(|i| !group_defs.contains(&i.id)) {
+        for i in instances_job.join().unwrap_or_default().into_iter().filter(|i| !group_defs.contains(&i.id)) {
             match at.get(&i.id) {
                 Some(&k) => {
                     if by_id[k].symbol.is_none() && i.symbol.is_some() {
@@ -1861,7 +1864,10 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
     }
     tick("walls");
     let slab = slab_into;
-    for f in doc.floors().into_iter().filter(|f| !group_defs.contains(&f.id)) {
+    // a reader whose batches the saved graphics replace is not run: its slabs would only be
+    // thrown away (2044 R24: 26 s for the three)
+    let floors = if want("Floors") || want("Structural foundations") { doc.floors() } else { Vec::new() };
+    for f in floors.into_iter().filter(|f| !group_defs.contains(&f.id)) {
         let t = f.thickness.filter(|t| *t > 0.0).unwrap_or(0.5);
         // step 2239: a foundation slab is a Floor of category Structural Foundations
         let b = if doc.element(f.id).map(|e| e.category) == Some(-2001300) {
@@ -1871,16 +1877,19 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
         };
         slab(b, &f.curves, f.top_z, t, true);
     }
-    for f in doc.ceilings().into_iter().filter(|f| !group_defs.contains(&f.id)) {
+    let ceilings = if want("Ceilings") { doc.ceilings() } else { Vec::new() };
+    for f in ceilings.into_iter().filter(|f| !group_defs.contains(&f.id)) {
         let t = f.thickness.filter(|t| *t > 0.0).unwrap_or(0.08);
         slab(batch!("Ceilings", [0.93, 0.92, 0.90]), &f.curves, f.top_z, t, false);
     }
-    for r in doc.roofs().into_iter().filter(|r| !group_defs.contains(&r.id)) {
+    let roofs = if want("Roofs") { doc.roofs() } else { Vec::new() };
+    for r in roofs.into_iter().filter(|r| !group_defs.contains(&r.id)) {
         roof_into(batch!("Roofs", [0.60, 0.30, 0.18]), &r);
     }
     // Step 2290: a roof by face on a mass (Technical school 2015 roof 140056 on mass 139739): the
     // outline of the mass's model lines in plan, between the roof's stored bottom and top
-    for (rid, cs) in doc.mass_roofs().into_iter().filter(|(r, _)| !group_defs.contains(r)) {
+    let mass_roofs = if want("Roofs") { doc.mass_roofs() } else { Vec::new() };
+    for (rid, cs) in mass_roofs.into_iter().filter(|(r, _)| !group_defs.contains(r)) {
         let Some(bb) = doc.element(rid).and_then(|e| e.bbox) else { continue };
         let t = bb[5] - bb[2];
         if !(t > 0.01 && t < 5.0) {
