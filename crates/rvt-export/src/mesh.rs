@@ -1270,6 +1270,9 @@ fn saved_batches(doc: &Document, cands: Vec<SavedCand>, hidden: &std::collection
     saved
 }
 
+/// Topography surfaces and toposolids: not hidden by the default 3D view's category visibility.
+const TERRAIN_CATEGORIES: [i64; 2] = [-2001340, -2001079];
+
 /// The batch an element of a category goes to when drawn from saved graphics, and whether an
 /// element of it without saved graphics keeps the batch as built from the readers (false: a
 /// category of lines and markers that may have none).
@@ -1518,7 +1521,11 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
         // 628450–628456, 4000 ft² not in Revit's view)
         skip.extend(doc.inplace_ids());
         tick("inplace");
-        let hidden = crate::views::default_3d_hidden_categories(doc);
+        let mut hidden = crate::views::default_3d_hidden_categories(doc);
+        // the terrain is drawn whatever that view shows: a default view kept as a detail view hides
+        // the site (2044 R24: section box 4 x 2 x 3 m, topography and toposolids off), and a model
+        // without its terrain reads as a file without one
+        hidden.retain(|c| !TERRAIN_CATEGORIES.contains(c));
         tick("hidden cats");
         let mut cands = saved_candidates(doc, sg, &skip, &hidden);
         tick("candidates");

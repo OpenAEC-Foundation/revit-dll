@@ -220,7 +220,10 @@ fn run(args: &[String]) -> Result<Value, String> {
             let doc = rvt_read::Document::open(path).map_err(err)?;
             let chains: Vec<Value> =
                 doc.topography_by_chain().into_iter().map(|(s, i, v)| json!({"stream": s, "index": i, "topography": v})).collect();
-            Ok(json!({"chains": chains}))
+            match doc.site_poche_base() {
+                Some((base, material)) => Ok(json!({"chains": chains, "poche_base": base, "section_cut_material": material})),
+                None => Ok(json!({"chains": chains})),
+            }
         }
         "legacy_stairs" => {
             let doc = rvt_read::Document::open(path).map_err(err)?;

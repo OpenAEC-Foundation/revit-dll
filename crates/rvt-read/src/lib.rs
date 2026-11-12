@@ -1126,6 +1126,17 @@ impl Document {
         self.topography_by_chain().into_iter().flat_map(|(_, _, t)| t).collect()
     }
 
+    /// Site Settings 'Elevation of poche base' (feet: the elevation down to which a section fills
+    /// the earth under a topography surface) and the section cut material, from the
+    /// first `TrueNorth` element (`m_pocheDepth`, `m_siteCutMaterialId`; the later ones hold the
+    /// defaults, −10 ft and no material). None when the file has no object records.
+    pub fn site_poche_base(&self) -> Option<(f64, Option<i64>)> {
+        let id = self.object_ids_of_class("TrueNorth").into_iter().next()?;
+        let o = self.object_root(id).or_else(|| self.object(id))?;
+        let depth = o.get("m_pocheDepth")?.as_f64().filter(|d| d.is_finite())?;
+        Some((depth, o.get("m_siteCutMaterialId").and_then(|m| m.element()).filter(|m| *m > 0)))
+    }
+
     /// The class tag of canonical (2026) class `canonical` in this file's version.
     pub fn class_tag(&self, canonical: u16) -> Option<u16> {
         vtag(self.info().version, canonical)
