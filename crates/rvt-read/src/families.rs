@@ -84,7 +84,17 @@ fn scan_family_keys(
         if hi < 16 {
             return;
         }
-        for i in lo..hi.min(data.len()).saturating_sub(15) {
+        // the family bodies only, in the order of the chain (a key outside them names no family):
+        // the families of a large project lie spread over its whole chain (2044 R24: 776 MiB,
+        // 6.6 s when every byte between the first and the last family was tried)
+        let end = hi.min(data.len()).saturating_sub(15);
+        let mut from = lo;
+        let inside = fams.iter().flat_map(|&(start, stop, _)| {
+            let range = start.max(from)..stop.min(end);
+            from = from.max(stop);
+            range
+        });
+        for i in inside {
             // step 2227: cheap 4-byte prefix check before the full key lookup
             if !prefixes.contains(&u32::from_le_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]])) {
                 continue;

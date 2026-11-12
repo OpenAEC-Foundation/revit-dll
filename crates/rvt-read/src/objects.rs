@@ -98,9 +98,11 @@ pub fn root_tag(body: &[u8]) -> Option<u16> {
 impl ObjectStore {
     pub fn read(cfb: &Cfb) -> Result<Self> {
         let schema = Schema::read(cfb)?;
-        let records = file_channel(cfb, &schema, 102)?.into_iter().map(|(k, r)| (k, r.body)).collect();
-        let headers = file_channel(cfb, &schema, 101)?.into_iter().map(|(k, r)| (k, r.body)).collect();
-        let es = es_catalog(cfb, &schema);
+        // the three beside each other (the channels inflate on all cores)
+        let (headers, (es, records)) =
+            rvt_core::par::both(|| file_channel(cfb, &schema, 101), || rvt_core::par::both(|| es_catalog(cfb, &schema), || file_channel(cfb, &schema, 102)));
+        let records = records?.into_iter().map(|(k, r)| (k, r.body)).collect();
+        let headers = headers?.into_iter().map(|(k, r)| (k, r.body)).collect();
         Ok(ObjectStore { schema, records, headers, es })
     }
 

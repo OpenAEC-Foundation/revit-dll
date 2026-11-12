@@ -55,10 +55,12 @@ pub fn channel_records(raw: &[u8], m: Markers, channel: u64, main_only: bool) ->
 
 /// As `channel_records`, with element ids of `id_bytes` (8: Revit 2024+, 4: 32-bit files).
 pub fn channel_records_ids(raw: &[u8], m: Markers, channel: u64, main_only: bool, id_bytes: usize) -> Result<HashMap<u64, Record>> {
-    let mut out = HashMap::new();
     let mut p = 8usize;
     let mut content = 0usize;
-    let mut group: Vec<u8> = Vec::new();
+    // the groups of the channel first (the content block of their last segment, and their gzip
+    // members), then inflated and split on all cores: a large project has some thousand
+    let mut groups: Vec<(usize, Vec<&[u8]>)> = Vec::new();
+    let mut group: Vec<&[u8]> = Vec::new();
     let mut gch = 0u64;
     while p + 2 <= raw.len() {
         let t = le_u16(raw, p)?;
@@ -79,11 +81,10 @@ pub fn channel_records_ids(raw: &[u8], m: Markers, channel: u64, main_only: bool
                 gch = ch;
             }
             if gch == channel && (!main_only || content == 1) {
-                flate2::read::GzDecoder::new(member).read_to_end(&mut group)?;
+                group.push(member);
             }
             if flags & 2 == 0 && gch == channel && (!main_only || content == 1) {
-                split(&group, channel, content, id_bytes, &mut out)?;
-                group.clear();
+                groups.push((content, std::mem::take(&mut group)));
             }
         } else if t == m.checkback {
             p += 4;
@@ -107,10 +108,23 @@ pub fn channel_records_ids(raw: &[u8], m: Markers, channel: u64, main_only: bool
             return Err(Error::Format(format!("unknown partition marker {t} at {}", p - 2)));
         }
     }
+    let read = crate::par::map(&groups, |(content, members)| -> Result<Vec<(u64, Record)>> {
+        let mut bytes = Vec::new();
+        for member in members {
+            flate2::read::GzDecoder::new(*member).read_to_end(&mut bytes)?;
+        }
+        let mut records = Vec::new();
+        split(&bytes, channel, *content, id_bytes, &mut records)?;
+        Ok(records)
+    });
+    let mut out = HashMap::new();
+    for records in read {
+        out.extend(records?);
+    }
     Ok(out)
 }
 
-fn split(g: &[u8], channel: u64, content: usize, id_bytes: usize, out: &mut HashMap<u64, Record>) -> Result<()> {
+fn split(g: &[u8], channel: u64, content: usize, id_bytes: usize, out: &mut Vec<(u64, Record)>) -> Result<()> {
     let hdr = if channel == 101 { 4 } else { 8 };
     let mut q = 0usize;
     while q + id_bytes + hdr <= g.len() {
@@ -121,7 +135,7 @@ fn split(g: &[u8], channel: u64, content: usize, id_bytes: usize, out: &mut Hash
         if le_u32(g, start + len)? as usize != len {
             return Err(Error::Format(format!("record {id}: trailing length differs")));
         }
-        out.insert(id, Record { content, body: body.to_vec() });
+        out.push((id, Record { content, body: body.to_vec() }));
         q = start + len + 4;
     }
     Ok(())

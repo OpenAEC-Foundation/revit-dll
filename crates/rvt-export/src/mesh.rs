@@ -1466,20 +1466,26 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
     sc.spawn(|| drop(doc.family_chains()));
     sc.spawn(|| drop(doc.type_values_by_chain()));
     sc.spawn(|| drop(doc.parameter_names_global()));
+    // and the saved graphics and the object records, which the first steps below wait for
+    sc.spawn(|| doc.saved_graphics().is_some());
     let mut group_defs = doc.group_definition_ids();
+    tick("group defs");
     // Step 2260: demolished elements (Phase Demolished set) are not shown in a {3D} view of the last
     // phase with 'Show Complete' (snowdon arch 2025: 6 legend floors, created = demolished = 'Legends';
     // rac/rme/rst 2026: no element demolished, every element of Revit's geometry has a phase).
     group_defs.extend(doc.element_phases().into_iter().filter(|(_, (_, d))| d.is_some()).map(|(id, _)| id));
+    tick("phases");
     // Step 2284: elements of a secondary design option are not in the {3D} view (snowdon arch 2025
     // 'Bleacher Seating' option 'Continuous Bleachers no Stairs': 9 floors and their slab edges).
     group_defs.extend(doc.secondary_option_elements());
+    tick("options");
     // Step 2308: and demolished per the object graph of 2023+ files (the phase reader misses most
     // elements of 32-bit files: storax_lamellengevels, 1510 elements demolished in phase 0, among
     // them all 716 curtain panels; Revit's {3D} view shows none)
     if let Some(sg) = doc.saved_graphics() {
         group_defs.extend(sg.demolished.iter().copied());
     }
+    tick("saved graphics read");
     // step 2227: the expensive readers once
     let walls_all = {
         // step 2228: one record per id (a wall can appear in two project chains)
@@ -1488,6 +1494,7 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
         let inplace = doc.inplace_ids();
         doc.walls().into_iter().filter(|w| seen.insert(w.id) && !inplace.contains(&w.id) && !group_defs.contains(&w.id)).collect::<Vec<_>>()
     };
+    tick("walls read");
     // step 2304: the saved-graphics batches, on their own thread (merged at the end); step 2306:
     // the batches they replace are known now, and the readers below skip them
     let mut replaced: std::collections::HashSet<&'static str> = Default::default();
@@ -1498,17 +1505,23 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
         let mut skip = group_defs.clone();
         // walls without a compound type are drawn by their panels (step 2215)
         skip.extend(walls_all.iter().filter(|w| doc.type_thickness(w.wall_type).map_or(true, |t| t <= 0.0)).map(|w| w.id));
+        tick("thickness");
         // so are sloped-glazing roofs (type class CurtainRoofAttributes): their own record holds a
         // slab Revit does not draw (rac advanced 2019: 3 roofs, 242 m² over the glass panels)
         skip.extend(curtain_roofs(doc));
+        tick("curtain roofs");
         // shared nested instances their super instance no longer lists (Storax lamellengevels: 84
         // lamellas, 35 m², that Revit's element collector does not have)
         skip.extend(orphan_subinstances(doc));
+        tick("orphans");
         // members of in-place families are drawn by the family instance (racbasic 2026: walls
         // 628450–628456, 4000 ft² not in Revit's view)
         skip.extend(doc.inplace_ids());
+        tick("inplace");
         let hidden = crate::views::default_3d_hidden_categories(doc);
+        tick("hidden cats");
         let mut cands = saved_candidates(doc, sg, &skip, &hidden);
+        tick("candidates");
         // step 2312b: stair runs, landings and supports a stair's record already draws (3077 R26:
         // as symbols of its instances; snowdon arch 2025, rac basic 2026: not) are not drawn twice
         let in_stairs: std::collections::HashSet<u64> = {
@@ -1518,6 +1531,7 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
             }
             m.drawn_symbols
         };
+        tick("stairs symbols");
         cands.retain(|c| !in_stairs.contains(&c.id));
         replaced = saved_plan(sg, &cands);
         saved_job = Some(sc.spawn(move || saved_batches(doc, cands, &hidden)));

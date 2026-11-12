@@ -58,21 +58,34 @@ pub fn strip_inserted(raw: &[u8]) -> Vec<u8> {
     out
 }
 
-/// §2.5: a gzip member; raw deflate from member + 10, CRC32/ISIZE checked.
-fn inflate(raw: &[u8], pos: usize, length: usize) -> Result<Vec<u8>> {
+/// §2.5: a gzip member; raw deflate from member + 10, CRC32/ISIZE checked. Inflated into `out`,
+/// which has the length its ISIZE gives.
+fn inflate(raw: &[u8], pos: usize, length: usize, out: &mut [u8]) -> Result<()> {
     let src = raw
         .get(pos + 10..pos + length)
         .ok_or_else(|| Error::Format(format!("gzip member at {pos} out of range")))?;
-    let mut out = Vec::new();
-    flate2::read::DeflateDecoder::new(src).read_to_end(&mut out)?;
-    let crc = le_u32(raw, pos + length - 8)?;
-    let isize = le_u32(raw, pos + length - 4)?;
-    let mut c = flate2::Crc::new();
-    c.update(&out);
-    if c.sum() != crc || out.len() as u32 != isize {
-        return Err(Error::Format(format!("CRC/ISIZE mismatch in member at {pos}")));
+    let mismatch = || Error::Format(format!("CRC/ISIZE mismatch in member at {pos}"));
+    let mut decoder = flate2::read::DeflateDecoder::new(src);
+    decoder.read_exact(out).map_err(|_| mismatch())?;
+    // nothing may follow what its ISIZE announced
+    if decoder.read(&mut [0u8; 1])? != 0 {
+        return Err(mismatch());
     }
-    Ok(out)
+    let crc = le_u32(raw, pos + length - 8)?;
+    let mut c = flate2::Crc::new();
+    c.update(out);
+    if c.sum() != crc {
+        return Err(mismatch());
+    }
+    Ok(())
+}
+
+/// The length a gzip member inflates to: its ISIZE, the last four bytes.
+fn inflated_len(raw: &[u8], pos: usize, length: usize) -> Result<usize> {
+    if length < 18 {
+        return Err(Error::Format(format!("gzip member at {pos} out of range")));
+    }
+    Ok(le_u32(raw, pos + length - 4)? as usize)
 }
 
 /// §2.2–2.4: chains follow the header lengths.
@@ -95,15 +108,17 @@ pub fn chains(raw: &[u8]) -> Result<Vec<Chain>> {
     let mut pos = 44usize;
     let mut len = le_u32(raw, 28)? as isize - 8;
     let mut key = None;
+    // the gzip members of every chain first (their places follow from the lengths alone), then
+    // inflated on all cores: a large project is one partition of some thousand chains
+    let mut members: Vec<(usize, usize, usize, usize)> = Vec::new();
     loop {
-        let mut data = Vec::new();
         while len > 0 {
-            data.extend(inflate(raw, pos, len as usize)?);
+            members.push((idx, pos, len as usize, inflated_len(raw, pos, len as usize)?));
             let h = pos + len as usize;
             len = le_u32(raw, h + 16)? as isize - 8;
             pos = h + 32;
         }
-        out.push(Chain { index: idx, key, count, data, bits: None, version: None, elements: vec![], hdr });
+        out.push(Chain { index: idx, key, count, data: Vec::new(), bits: None, version: None, elements: vec![], hdr });
         // marker = u16 (t+1) | ff×4 | u16 t (step 254); 220 bytes, or 78 in 2016/2017 (step 1481)
         let mut next = None;
         for gap in [220usize, 78] {
@@ -113,13 +128,39 @@ pub fn chains(raw: &[u8]) -> Result<Vec<Chain>> {
                 break;
             }
         }
-        let Some(ch) = next else { return Ok(out) };
+        let Some(ch) = next else { break };
         idx += 1;
         count = le_u32(raw, ch + 8)?;
         key = Some(raw[ch + 12..ch + 28].try_into().expect("16 bytes"));
         len = le_u32(raw, ch + 38)? as isize - 8;
         pos = ch + 54;
     }
+    // each chain at its full length, each member inflated into its own part of it
+    let mut lengths = vec![0usize; out.len()];
+    for &(chain, .., n) in &members {
+        lengths[chain] += n;
+    }
+    for (ch, n) in out.iter_mut().zip(lengths) {
+        ch.data = vec![0; n];
+    }
+    let mut parts = Vec::with_capacity(members.len());
+    let mut of = members.iter().peekable();
+    for ch in out.iter_mut() {
+        let mut rest = ch.data.as_mut_slice();
+        while let Some(&(_, pos, len, n)) = of.next_if(|m| m.0 == ch.index) {
+            let (part, after) = rest.split_at_mut(n);
+            parts.push(std::sync::Mutex::new((pos, len, part)));
+            rest = after;
+        }
+    }
+    for done in crate::par::map(&parts, |part| {
+        let mut part = part.lock().expect("one thread per member");
+        let (pos, len) = (part.0, part.1);
+        inflate(raw, pos, len, part.2)
+    }) {
+        done?;
+    }
+    Ok(out)
 }
 
 /// §3.4 presence rule (64-bit), shifted by s = 22·w.
