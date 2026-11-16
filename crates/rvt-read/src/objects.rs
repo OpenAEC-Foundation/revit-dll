@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use rvt_core::graph::{EsCatalog, EsField, EsSchema, Graph, Object, Value};
-use rvt_core::records::file_channel;
+use rvt_core::records::{file_channel, stream_channel};
 use rvt_core::schema::{Field, Schema};
 use rvt_core::{Cfb, Result};
 use rvt_model::{ChannelCoverage, FailingClass, FieldValue, FieldView, NestedObject, ObjectView};
@@ -104,6 +104,15 @@ impl ObjectStore {
         let records = records?.into_iter().map(|(k, r)| (k, r.body)).collect();
         let headers = headers?.into_iter().map(|(k, r)| (k, r.body)).collect();
         Ok(ObjectStore { schema, records, headers, es })
+    }
+
+    /// The object records of one family document: content block `chain + 1` of partition stream
+    /// `stream` (the chain `Document::family_chains` names for a family), read with this file's
+    /// schema. Element ids are the family document's own.
+    pub fn family(&self, cfb: &Cfb, stream: &str, chain: usize) -> Result<Self> {
+        let records = stream_channel(cfb, &self.schema, stream, chain + 1, 102)?.into_iter().map(|(k, r)| (k, r.body)).collect();
+        let headers = stream_channel(cfb, &self.schema, stream, chain + 1, 101)?.into_iter().map(|(k, r)| (k, r.body)).collect();
+        Ok(ObjectStore { schema: self.schema.clone(), records, headers, es: self.es.clone() })
     }
 
     /// Decodes a record body with this file's schema and ES schemas.

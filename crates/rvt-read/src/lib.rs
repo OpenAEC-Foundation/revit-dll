@@ -80,6 +80,8 @@ pub struct Document {
     source: Option<Cfb>,
     /// Par C: object records (channel 102) and element headers (channel 101) with the schema.
     objects: std::sync::OnceLock<Option<objects::ObjectStore>>,
+    /// The object records of the family documents asked for, by family id (none: not readable).
+    family_objects: std::sync::Mutex<HashMap<u64, Option<std::sync::Arc<objects::ObjectStore>>>>,
     /// Readers the scene calls several times and that take seconds on a large file (family chains
     /// 4.7 s, type values 2 s, parameter names 1 s on a 87 MB model): worked out once.
     family_chains: std::sync::OnceLock<std::collections::BTreeMap<u64, (String, usize)>>,
@@ -223,6 +225,32 @@ impl Document {
         self.objects.get_or_init(|| self.with_cfb(|c| objects::ObjectStore::read(c).ok()).filter(|s| !s.records.is_empty())).as_ref()
     }
 
+    /// The object records of a family's own document (read once per family, on first use): the
+    /// labels, lines and regions a tag, symbol or title block is drawn from. Element ids in it are
+    /// the family document's own. None when the family has no document chain or no object records.
+    pub fn family_object_store(&self, family: u64) -> Option<std::sync::Arc<objects::ObjectStore>> {
+        if let Some(known) = self.family_objects.lock().ok()?.get(&family) {
+            return known.clone();
+        }
+        let store = self.family_chains().get(&family).and_then(|(stream, chain)| {
+            let main = self.object_store()?;
+            self.with_cfb(|c| main.family(c, stream, *chain).ok()).filter(|s| !s.records.is_empty()).map(std::sync::Arc::new)
+        });
+        self.family_objects.lock().ok()?.insert(family, store.clone());
+        store
+    }
+
+    /// An element of a family's own document as an object (see `object`).
+    pub fn family_object(&self, family: u64, id: u64) -> Option<rvt_model::ObjectView> {
+        self.family_object_store(family)?.view(id, None)
+    }
+
+    /// Ids (ascending) of the elements of a family's own document whose class is `class` or
+    /// derives from it.
+    pub fn family_object_ids_of_class(&self, family: u64, class: &str) -> Vec<u64> {
+        self.family_object_store(family).map(|s| s.ids_of_class(class)).unwrap_or_default()
+    }
+
     /// Par C: any element as an object of its schema class: class, ancestors, typed fields,
     /// element references as ids, nested objects. None when the element has no object record.
     pub fn object(&self, id: u64) -> Option<rvt_model::ObjectView> {
@@ -341,6 +369,7 @@ impl Document {
             saved: std::sync::OnceLock::new(),
             source: None,
             objects: std::sync::OnceLock::new(),
+            family_objects: std::sync::Mutex::new(HashMap::new()),
             family_chains: std::sync::OnceLock::new(),
             type_values: std::sync::OnceLock::new(),
             global_names: std::sync::OnceLock::new(),

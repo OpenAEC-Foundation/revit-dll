@@ -55,6 +55,14 @@ pub fn channel_records(raw: &[u8], m: Markers, channel: u64, main_only: bool) ->
 
 /// As `channel_records`, with element ids of `id_bytes` (8: Revit 2024+, 4: 32-bit files).
 pub fn channel_records_ids(raw: &[u8], m: Markers, channel: u64, main_only: bool, id_bytes: usize) -> Result<HashMap<u64, Record>> {
+    content_records(raw, m, channel, main_only.then_some(1), id_bytes)
+}
+
+/// The records of `channel` in one stripped partition stream, by element id: those of content
+/// block `only` (1 = the document itself, `k + 1` = the family document of chain `k`; element ids
+/// are a document's own, so blocks are not to be mixed), or of every block when none is named.
+pub fn content_records(raw: &[u8], m: Markers, channel: u64, only: Option<usize>, id_bytes: usize) -> Result<HashMap<u64, Record>> {
+    let wanted = |content: usize| only.is_none_or(|k| k == content);
     let mut p = 8usize;
     let mut content = 0usize;
     // the groups of the channel first (the content block of their last segment, and their gzip
@@ -80,10 +88,10 @@ pub fn channel_records_ids(raw: &[u8], m: Markers, channel: u64, main_only: bool
                 group.clear();
                 gch = ch;
             }
-            if gch == channel && (!main_only || content == 1) {
+            if gch == channel && wanted(content) {
                 group.push(member);
             }
-            if flags & 2 == 0 && gch == channel && (!main_only || content == 1) {
+            if flags & 2 == 0 && gch == channel && wanted(content) {
                 groups.push((content, std::mem::take(&mut group)));
             }
         } else if t == m.checkback {
@@ -167,4 +175,13 @@ pub fn file_channel(cfb: &Cfb, schema: &Schema, channel: u64) -> Result<HashMap<
         out.extend(recs);
     }
     Ok(out)
+}
+
+/// The records of `channel` of content block `content` of one partition stream (`Partitions/N`),
+/// by element id: the document of the chain with index `content − 1`. The id width (8 or 4 bytes)
+/// is the one whose records split exactly.
+pub fn stream_channel(cfb: &Cfb, schema: &Schema, stream: &str, content: usize, channel: u64) -> Result<HashMap<u64, Record>> {
+    let m = Markers::from_schema(schema).ok_or_else(|| Error::Format("schema has no partition markers".into()))?;
+    let raw = crate::chain::strip_inserted(&cfb.stream(stream)?);
+    content_records(&raw, m, channel, Some(content), 8).or_else(|_| content_records(&raw, m, channel, Some(content), 4))
 }

@@ -33,7 +33,7 @@ const USAGE: &str = "usage:
   rvt mesh <file.rvt> [scene.bin]      viewer meshes per category (summary; optional binary)
   rvt object <file.rvt> <id>           any element as its schema class with typed fields
   rvt classes <file.rvt>               schema class -> number of elements
-  rvt objects <file.rvt> --class <name> [--limit n]
+  rvt objects <file.rvt> --class <name> [--limit n] [--family id]
                                        elements of a class and its subclasses, as objects
   rvt coverage <file.rvt>              decoded records per channel, top failing classes
   rvt views <file.rvt> [--all] [--json] model views, one line each (id, kind, name, camera,
@@ -310,7 +310,8 @@ fn run(args: &[String]) -> Result<Value, String> {
         "object" => {
             let id: u64 = args.get(2).and_then(|s| s.parse().ok()).ok_or(USAGE)?;
             let doc = rvt_read::Document::open(path).map_err(err)?;
-            match doc.object(id) {
+            let family: Option<u64> = opt(args, "--family").and_then(|f| f.parse().ok());
+            match family.map_or_else(|| doc.object(id), |f| doc.family_object(f, id)) {
                 Some(o) => to(serde_json::to_value(o)),
                 None if doc.object_store().is_none() => Err(format!("{path}: no object records (schema or partition records not readable)")),
                 None => Err(format!("{path}: no object record for element {id}")),
@@ -321,6 +322,10 @@ fn run(args: &[String]) -> Result<Value, String> {
             if doc.object_store().is_none() {
                 return Err(format!("{path}: no object records (schema or partition records not readable)"));
             }
+            if let Some(family) = opt(args, "--family").and_then(|f| f.parse::<u64>().ok()) {
+                let store = doc.family_object_store(family).ok_or_else(|| format!("{path}: no object records for family {family}"))?;
+                return Ok(json!({"family": family, "classes": store.classes()}));
+            }
             Ok(json!({"classes": doc.classes()}))
         }
         "objects" => {
@@ -330,8 +335,9 @@ fn run(args: &[String]) -> Result<Value, String> {
                 None => usize::MAX,
             };
             let doc = rvt_read::Document::open(path).map_err(err)?;
-            let ids = doc.object_ids_of_class(class);
-            let objects: Vec<_> = ids.iter().take(limit).filter_map(|&id| doc.object(id)).collect();
+            let family: Option<u64> = opt(args, "--family").and_then(|f| f.parse().ok());
+            let ids = family.map_or_else(|| doc.object_ids_of_class(class), |f| doc.family_object_ids_of_class(f, class));
+            let objects: Vec<_> = ids.iter().take(limit).filter_map(|&id| family.map_or_else(|| doc.object(id), |f| doc.family_object(f, id))).collect();
             Ok(json!({"class": class, "total": ids.len(), "objects": objects}))
         }
         "views" => {
