@@ -17,7 +17,7 @@ fn main() {
     }
     time!("object store", doc.object_store().map(|s| s.records.len()));
     time!("walls", doc.walls().len());
-    time!("walls again", doc.walls().len());
+    time!("walls in place", doc.walls().iter().filter(|w| w.in_place).count());
     time!("element_phases", doc.element_phases().len());
     time!("group_definition_ids", doc.group_definition_ids().len());
     time!("secondary_option_elements", doc.secondary_option_elements().len());
@@ -32,6 +32,10 @@ fn main() {
     time!("group_definition_members", doc.group_definition_members_by_chain().len());
     time!("type_values_by_chain", doc.type_values_by_chain().len());
     time!("family_param_associations", doc.family_param_associations().len());
+    time!("parameter_names_global", doc.parameter_names_global().len());
+    time!("wall_sweeps", doc.wall_sweeps().len());
+    time!("topography", doc.topography().len());
+    time!("symbol_family again", doc.symbol_family().len());
     time!("floors", doc.floors().len());
     time!("roofs", doc.roofs().len());
 }

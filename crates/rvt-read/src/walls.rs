@@ -150,6 +150,9 @@ pub(crate) fn walls(ch: &Chain, ctx: &WallContext) -> Vec<Wall> {
     let mut wtypes: HashSet<i64> = ctx.wall_types.clone();
     wtypes.extend(cand.keys().filter(|i| !inst_set.contains(i)).map(|&i| i as i64));
     let fam: Vec<(u64, &[u8])> = ch.elements.iter().filter(|e| e.tag.is_some() && e.tag == tag_fam).map(|e| (e.id, ch.body(e))).collect();
+    // the family ids as a wall body holds them (32-bit files: their low four bytes)
+    let as_stored = |f: u64| if bits32 { f as i64 as i32 as i64 } else { f as i64 };
+    let fam_ids: HashSet<i64> = fam.iter().map(|(f, _)| as_stored(*f)).collect();
 
     let mut out = Vec::new();
     for i in inst {
@@ -191,7 +194,10 @@ pub(crate) fn walls(ch: &Chain, ctx: &WallContext) -> Vec<Wall> {
             Loc::Arc { p0, p1, curve } => (p0, p1, Some(curve)),
         };
         let own = pack(i as i64);
-        let in_place = fam.iter().any(|(f, fb)| find(bd, &pack(*f as i64)).is_some() && find(fb, &own).is_some());
+        // the families the wall names, in one pass over its body (a project has hundreds of
+        // families: a search per family took 11.5 of the 11.6 s of reading 2044 R24's 801 walls)
+        let named: HashSet<i64> = (0..(l + 1).saturating_sub(w)).map(|o| rd(bd, o)).filter(|v| fam_ids.contains(v)).collect();
+        let in_place = !named.is_empty() && fam.iter().any(|(f, fb)| named.contains(&as_stored(*f)) && find(fb, &own).is_some());
         let cat = cat_of.get(&i).copied();
         let mut wall = Wall {
             id: i,

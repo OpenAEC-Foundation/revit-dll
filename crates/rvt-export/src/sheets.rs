@@ -7,7 +7,7 @@
 //! - every view has a `DBDrawing` with `m_viewports`; each `Viewport` joins a view
 //!   (`m_dbViewId`) to a drawing (`m_dbDrawingId`). The first viewport of a sheet's drawing is
 //!   the sheet itself (position 0); the others are the placed views with `m_viewPosition.m_xyz`
-//!   (sheet feet), `m_scale` (sheet / model, 0.05 = 1:20), `m_detailNumber` and
+//!   (`m_offset` in files before 2025; sheet feet), `m_scale` (sheet / model, 0.05 = 1:20), `m_detailNumber` and
 //!   `m_labelOrigin`;
 //! - the position is where the origin of the view's crop frame (its local 0, 0) lands on the
 //!   sheet, so the box is `position + crop min…max × scale`. Not the box centre: 3077 R26 'BP-21'
@@ -82,15 +82,26 @@ pub struct ViewportInfo {
 pub fn sheets(doc: &Document) -> Vec<SheetInfo> {
     let views: HashMap<u64, ViewInfo> = all_views(doc).into_iter().map(|v| (v.id, v)).collect();
     let mut captions = HashMap::new();
+    // the title block instances by the sheet that owns them: a file before Revit 2025 has no
+    // `m_sheetTitleBlockId` on its sheets (2044 R24: none of its 54 sheets), the title block is
+    // then the instance of category Title Blocks the sheet owns (the lowest id of several)
+    let mut owned: HashMap<u64, u64> = HashMap::new();
+    for e in doc.elements_in_category(-2000280) {
+        if let Some(sheet) = e.view.and_then(|v| u64::try_from(v).ok()) {
+            let held = owned.entry(sheet).or_insert(e.id);
+            *held = (*held).min(e.id);
+        }
+    }
     let mut out = Vec::new();
     for id in doc.object_ids_of_class("DBViewDrafting") {
+
         let Some(o) = doc.object_root(id).or_else(|| doc.object(id)) else { continue };
         let Some(number) = o.get("m_sheetNumber").and_then(|v| v.as_str()) else { continue };
         if element(o.get("m_famId")).is_some() || boolean(o.get("m_isTemplate")) == Some(true) {
             continue;
         }
         let name = o.get("m_viewName").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-        let title_block = element(o.get("m_sheetTitleBlockId")).and_then(|tb| title_block(doc, tb, &mut captions));
+        let title_block = element(o.get("m_sheetTitleBlockId")).or_else(|| owned.get(&id).copied()).and_then(|tb| title_block(doc, tb, &mut captions));
         let viewports = element(o.get("m_dbDrawingId"))
             .and_then(|d| doc.object_root(d).or_else(|| doc.object(d)))
             .map(|d| {
@@ -116,7 +127,9 @@ fn viewport(doc: &Document, id: u64, sheet: u64, views: &HashMap<u64, ViewInfo>)
         return None;
     }
     let info = views.get(&view);
-    let position = vec3(o.path(&["m_viewPosition", "m_xyz"]))?;
+    // files before 2025 have no `m_viewPosition`; their `m_offset` holds the same point (3070 R26
+    // stores both, equal on all its viewports)
+    let position = vec3(o.path(&["m_viewPosition", "m_xyz"])).or_else(|| vec3(o.get("m_offset")))?;
     let scale = o.get("m_scale").and_then(|v| v.as_f64()).filter(|s| s.is_finite() && *s > 0.0).unwrap_or(1.0);
     // an inactive crop box keeps Revit's default extents (3077 R26: 61 m squares), no box
     let rect = info
@@ -161,9 +174,11 @@ fn paper_size(doc: &Document, symbol: &ObjectView, captions: &mut HashMap<i64, O
         let Some(value) = np.get("m_value").and_then(|v| v.as_f64()).filter(|v| v.is_finite() && (0.3..20.0).contains(v)) else { continue };
         let Some(caption) = caption(doc, captions, pid) else { continue };
         let c = caption.to_lowercase();
-        if ["width", "breedte", "breite", "largeur"].iter().any(|w| c.contains(w)) {
+        // also by their letter alone (2044 R24: 'b' 1189 and 'h' 841 on its A0 title block)
+        let c = c.trim();
+        if ["width", "breedte", "breite", "largeur"].iter().any(|w| c.contains(w)) || matches!(c, "b" | "w" | "l") {
             width.get_or_insert(value);
-        } else if ["height", "hoogte", "höhe", "hauteur"].iter().any(|h| c.contains(h)) {
+        } else if ["height", "hoogte", "höhe", "hauteur"].iter().any(|h| c.contains(h)) || c == "h" {
             height.get_or_insert(value);
         }
     }

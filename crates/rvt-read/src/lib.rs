@@ -85,6 +85,9 @@ pub struct Document {
     family_chains: std::sync::OnceLock<std::collections::BTreeMap<u64, (String, usize)>>,
     type_values: std::sync::OnceLock<Vec<(String, usize, std::collections::BTreeMap<u64, rvt_model::ValueSet>)>>,
     global_names: std::sync::OnceLock<HashMap<u64, Option<String>>>,
+    symbol_family: std::sync::OnceLock<HashMap<u64, u64>>,
+    inplace_ids: std::sync::OnceLock<HashSet<u64>>,
+    group_definition_ids: std::sync::OnceLock<HashSet<u64>>,
 }
 
 /// Revit's own saved graphics (open-research, steps 2300–2303): the file's schema and the
@@ -132,6 +135,9 @@ impl Document {
         let cfb = Cfb::open(path.as_ref())?;
         let mut doc = Self::from_partitions(read_partitions(&cfb)?);
         doc.path = Some(path.as_ref().to_path_buf());
+        // kept for the saved graphics and the object records, which are read from it on first
+        // use: reading the file again for each took as long as opening it on a network drive
+        doc.source = Some(cfb);
         Ok(doc)
     }
 
@@ -151,28 +157,43 @@ impl Document {
                     }
                 };
                 let schema = rvt_core::Schema::read(cfb).ok()?;
-                let recs = rvt_core::records::file_channel(cfb, &schema, 103).ok()?;
+                // the graphics and the object graphs beside each other (each inflates on all
+                // cores); the object graphs are those of the object store, read once for both
+                let (store, recs) = rvt_core::par::both(|| self.object_store(), || rvt_core::records::file_channel(cfb, &schema, 103));
+                let recs = recs.ok()?;
+                let read;
+                let objs: Option<&HashMap<u64, Vec<u8>>> = match store {
+                    Some(store) => Some(&store.records),
+                    None => {
+                        read = rvt_core::records::file_channel(cfb, &schema, 102).ok().map(|m| m.into_iter().map(|(k, r)| (k, r.body)).collect::<HashMap<u64, Vec<u8>>>());
+                        read.as_ref()
+                    }
+                };
                 let mut styles = HashMap::new();
                 let mut style_material = HashMap::new();
                 let mut objects = HashMap::new();
                 let mut demolished = HashSet::new();
                 let keep: Vec<u16> = OBJECT_CLASSES.iter().filter_map(|c| schema.tag(c)).collect();
-                if let (Some(tag), Ok(objs)) = (schema.tag("GStyleElem"), rvt_core::records::file_channel(cfb, &schema, 102)) {
-                    for (id, r) in objs {
-                        if let Ok(o) = rvt_core::graph::Graph::decode_root(&schema, &r.body) {
-                            if o.get("m_demolishedPhaseId").and_then(|v| v.element_id()).is_some_and(|d| d != -1) {
-                                demolished.insert(id);
-                            }
+                if let (Some(tag), Some(objs)) = (schema.tag("GStyleElem"), objs) {
+                    // which of them are demolished: the root object of every element, on all cores
+                    let objs: Vec<(u64, &Vec<u8>)> = objs.iter().map(|(id, body)| (*id, body)).collect();
+                    let gone = rvt_core::par::map(&objs, |(_, body)| {
+                        rvt_core::graph::Graph::decode_root(&schema, body)
+                            .is_ok_and(|o| o.get("m_demolishedPhaseId").and_then(|v| v.element_id()).is_some_and(|d| d != -1))
+                    });
+                    for ((id, body), gone) in objs.into_iter().zip(gone) {
+                        if gone {
+                            demolished.insert(id);
                         }
-                        let root = r.body.get(..2).map(|b| u16::from_le_bytes([b[0], b[1]]));
+                        let root = body.get(..2).map(|b| u16::from_le_bytes([b[0], b[1]]));
                         if root.is_some_and(|t| keep.contains(&t)) {
-                            objects.insert(id, r.body);
+                            objects.insert(id, body.clone());
                             continue;
                         }
                         if root != Some(tag) {
                             continue;
                         }
-                        let graph = rvt_core::graph::Graph::decode(&schema, &r.body).ok();
+                        let graph = rvt_core::graph::Graph::decode(&schema, body).ok();
                         let cat = graph.as_ref().and_then(|g| g.objects.first()?.get("m_categoryId")?.element_id());
                         if let Some(m) = graph.as_ref().and_then(|g| g.objects.iter().find_map(|o| o.get("m_materialElemId")?.element_id())).filter(|m| *m != -1) {
                             style_material.insert(id, m);
@@ -323,6 +344,9 @@ impl Document {
             family_chains: std::sync::OnceLock::new(),
             type_values: std::sync::OnceLock::new(),
             global_names: std::sync::OnceLock::new(),
+            symbol_family: std::sync::OnceLock::new(),
+            inplace_ids: std::sync::OnceLock::new(),
+            group_definition_ids: std::sync::OnceLock::new(),
         };
         doc.rail_types = railings::rail_types(doc.partitions.iter().flat_map(|p| p.chains.iter()));
         let mut systems: Vec<MepSystem> = Vec::new();
@@ -940,18 +964,24 @@ impl Document {
 
     /// Ids of hidden group type definition copies (not drawn).
     pub fn group_definition_ids(&self) -> HashSet<u64> {
-        self.group_definition_members_by_chain().into_iter().flat_map(|(_, _, v)| v.into_iter().map(|m| m.id)).collect()
+        self.group_definition_ids
+            .get_or_init(|| self.group_definition_members_by_chain().into_iter().flat_map(|(_, _, v)| v.into_iter().map(|m| m.id)).collect())
+            .clone()
     }
 
     /// Ids of in-place family content in project chains (step 2238): drawn through the family
     /// instance if at all, never as separate walls, floors or instances.
     pub fn inplace_ids(&self) -> HashSet<u64> {
-        let project: HashSet<(String, usize)> = self.project_chains().map(|(p, ch)| (p.stream.clone(), ch.index)).collect();
-        self.inplace_members_by_chain()
-            .into_iter()
-            .filter(|(s, i, _)| project.contains(&(s.clone(), *i)))
-            .flat_map(|(_, _, v)| v.into_iter().map(|m| m.id))
-            .collect()
+        self.inplace_ids
+            .get_or_init(|| {
+                let project: HashSet<(String, usize)> = self.project_chains().map(|(p, ch)| (p.stream.clone(), ch.index)).collect();
+                self.inplace_members_by_chain()
+                    .into_iter()
+                    .filter(|(s, i, _)| project.contains(&(s.clone(), *i)))
+                    .flat_map(|(_, _, v)| v.into_iter().map(|m| m.id))
+                    .collect()
+            })
+            .clone()
     }
 
     /// Building pads per project chain (step 1672).
@@ -1002,15 +1032,13 @@ impl Document {
     }
 
     fn read_type_values(&self) -> Vec<(String, usize, std::collections::BTreeMap<u64, rvt_model::ValueSet>)> {
-        let global: HashSet<u64> = self
-            .partitions
-            .iter()
-            .filter_map(|p| p.chains.first().filter(|c| c.bits.is_some()))
-            .flat_map(|ch| params::parameter_names(ch).into_keys())
-            .collect();
+        // the names of chain 0 of every partition, read once (a second on a large project)
+        let global: HashSet<u64> = self.parameter_names_global().into_keys().collect();
         self.project_chains()
             .map(|(p, ch)| {
-                let mut prm: HashSet<u64> = params::parameter_names(ch).into_keys().collect();
+                // a project chain that is chain 0 of its partition has its names among those
+                let first = p.chains.first().is_some_and(|c| std::ptr::eq(c, ch));
+                let mut prm: HashSet<u64> = if first { HashSet::new() } else { params::parameter_names(ch).into_keys().collect() };
                 prm.extend(global.iter().copied());
                 let sets = params::value_sets(ch, &prm, &[2022]);
                 (p.stream.clone(), ch.index, sets.into_iter().map(|s| (s.owner, s)).collect())
@@ -1098,6 +1126,17 @@ impl Document {
         self.topography_by_chain().into_iter().flat_map(|(_, _, t)| t).collect()
     }
 
+    /// Site Settings 'Elevation of poche base' (feet: the elevation down to which a section fills
+    /// the earth under a topography surface) and the section cut material, from the
+    /// first `TrueNorth` element (`m_pocheDepth`, `m_siteCutMaterialId`; the later ones hold the
+    /// defaults, −10 ft and no material). None when the file has no object records.
+    pub fn site_poche_base(&self) -> Option<(f64, Option<i64>)> {
+        let id = self.object_ids_of_class("TrueNorth").into_iter().next()?;
+        let o = self.object_root(id).or_else(|| self.object(id))?;
+        let depth = o.get("m_pocheDepth")?.as_f64().filter(|d| d.is_finite())?;
+        Some((depth, o.get("m_siteCutMaterialId").and_then(|m| m.element()).filter(|m| *m > 0)))
+    }
+
     /// The class tag of canonical (2026) class `canonical` in this file's version.
     pub fn class_tag(&self, canonical: u16) -> Option<u16> {
         vtag(self.info().version, canonical)
@@ -1177,7 +1216,7 @@ impl Document {
 
     /// Symbol (family type) id -> family id (step 494; reference `catalog.symbol_family`).
     pub fn symbol_family(&self) -> HashMap<u64, u64> {
-        families::symbol_family(&self.partitions)
+        self.symbol_family.get_or_init(|| families::symbol_family(&self.partitions)).clone()
     }
 
     /// Extrusion solids of every family (non-project) chain, keyed by (partition stream, chain
