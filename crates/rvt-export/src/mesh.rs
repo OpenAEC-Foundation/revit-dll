@@ -2344,6 +2344,8 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
     let pads: Vec<(rvt_model::BuildingPad, Vec<Vec<[f64; 2]>>, f64, f64)> = doc
         .building_pads()
         .into_iter()
+        // a demolished pad, or one of a secondary design option, is not in the view (as the terrain below)
+        .filter(|p| !group_defs.contains(&p.id))
         .filter_map(|p| {
             let (groups, _) = plan_loops(p.outline.as_deref()?);
             let outer = groups.into_iter().next()?.into_iter().next()?;
@@ -2354,7 +2356,7 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
         .collect();
     let cut_surfaces: std::collections::HashSet<i64> = pads.iter().filter_map(|(p, ..)| p.cut_surface).collect();
     let topography = topography_job.join().unwrap_or_default();
-    for t in topography.into_iter().filter(|t| !hidden.contains(&t.id) && !cut_surfaces.contains(&(t.id as i64))) {
+    for t in topography.into_iter().filter(|t| !hidden.contains(&t.id) && !group_defs.contains(&t.id) && !cut_surfaces.contains(&(t.id as i64))) {
         let base = delaunator::triangulate(&t.points.iter().map(|p| delaunator::Point { x: p[0], y: p[1] }).collect::<Vec<_>>());
         if base.triangles.is_empty() {
             continue;
