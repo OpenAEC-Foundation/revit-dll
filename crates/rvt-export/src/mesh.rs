@@ -1272,6 +1272,9 @@ fn saved_batches(doc: &Document, cands: Vec<SavedCand>, hidden: &std::collection
 
 /// Topography surfaces and toposolids: not hidden by the default 3D view's category visibility.
 const TERRAIN_CATEGORIES: [i64; 2] = [-2001340, -2001079];
+/// The batch the reader draws the terrain of building pads in while the saved graphics draw the
+/// other terrain; it joins the Topography batch at the end.
+const PAD_TERRAIN: &str = "Topography of pads";
 
 /// The batch an element of a category goes to when drawn from saved graphics, and whether an
 /// element of it without saved graphics keeps the batch as built from the readers (false: a
@@ -1498,6 +1501,15 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
         doc.walls().into_iter().filter(|w| seen.insert(w.id) && !inplace.contains(&w.id) && !group_defs.contains(&w.id)).collect::<Vec<_>>()
     };
     tick("walls read");
+    // the terrain surfaces building pads cut, and the cut surfaces of those pads
+    let pad_terrain: std::collections::HashSet<u64> = doc
+        .building_pads()
+        .into_iter()
+        .filter(|p| !group_defs.contains(&p.id))
+        .flat_map(|p| [p.topo, p.cut_surface])
+        .flatten()
+        .filter_map(|id| u64::try_from(id).ok())
+        .collect();
     // step 2304: the saved-graphics batches, on their own thread (merged at the end); step 2306:
     // the batches they replace are known now, and the readers below skip them
     let mut replaced: std::collections::HashSet<&'static str> = Default::default();
@@ -1506,6 +1518,9 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
     // (storax_lamellengevels z −1445 ft) are in Revit's {3D} view as well
     if let Some(sg) = std::env::var_os("RVT_NO_SAVED").is_none().then(|| doc.saved_graphics()).flatten() {
         let mut skip = group_defs.clone();
+        // a terrain a building pad cuts is stored whole, with the pad's cut surface as an element
+        // of its own (2044 R24): the reader below draws it with its hole and pit walls instead
+        skip.extend(pad_terrain.iter().copied());
         // walls without a compound type are drawn by their panels (step 2215)
         skip.extend(walls_all.iter().filter(|w| doc.type_thickness(w.wall_type).map_or(true, |t| t <= 0.0)).map(|w| w.id));
         tick("thickness");
@@ -2380,6 +2395,10 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
         };
         let mine: Vec<&(rvt_model::BuildingPad, Vec<Vec<[f64; 2]>>, f64, f64)> =
             pads.iter().filter(|(p, ..)| p.topo == Some(t.id as i64)).collect();
+        // where the saved graphics draw the terrain, only the terrain of a pad is drawn here
+        if !want("Topography") && mine.is_empty() {
+            continue;
+        }
         let mut pts = t.points.clone();
         let mut rims: Vec<Vec<P3>> = Vec::new();
         for (_, loops, ..) in &mine {
@@ -2400,7 +2419,8 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
             rims.push(rim);
         }
         let tri = if mine.is_empty() { base } else { delaunator::triangulate(&pts.iter().map(|p| delaunator::Point { x: p[0], y: p[1] }).collect::<Vec<_>>()) };
-        let b = batch!("Topography", [0.56, 0.64, 0.44]);
+        let b = if want("Topography") { batch!("Topography", [0.56, 0.64, 0.44]) } else { get(&mut batches, PAD_TERRAIN, [0.56, 0.64, 0.44]) };
+        let first = b.indices.len() as u32;
         for c in tri.triangles.chunks_exact(3) {
             let (p, q, r) = (pts[c[0]], pts[c[1]], pts[c[2]]);
             let m = [(p[0] + q[0] + r[0]) / 3.0, (p[1] + q[1] + r[1]) / 3.0];
@@ -2418,6 +2438,11 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
                     b.quad([a[0], a[1], zb], [c[0], c[1], zb], [c[0], c[1], c[2].max(zb)], [a[0], a[1], a[2].max(zb)]);
                 }
             }
+        }
+        // beside the saved graphics it is an element of its batch, as theirs are
+        if !want("Topography") {
+            let count = b.indices.len() as u32 - first;
+            b.elements.push((t.id, first, count));
         }
     }
     for (_, loops, top, th) in &pads {
@@ -3900,6 +3925,28 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
         }
     }
 
+    // the terrain of the pads, drawn by the reader, joins the terrain of the saved graphics
+    if let Some(extra) = batches.remove(PAD_TERRAIN) {
+        match batches.get_mut("Topography") {
+            Some(b) => {
+                let base = (b.positions.len() / 3) as u32;
+                let first = b.indices.len() as u32;
+                if !b.colors.is_empty() {
+                    let rgba = [extra.color[0], extra.color[1], extra.color[2], 1.0].map(|c| (c * 255.0).round() as u8);
+                    b.colors.extend((0..extra.positions.len() / 3).flat_map(|_| rgba));
+                }
+                b.positions.extend_from_slice(&extra.positions);
+                b.normals.extend_from_slice(&extra.normals);
+                b.indices.extend(extra.indices.iter().map(|i| i + base));
+                b.elements.extend(extra.elements.iter().map(|&(id, f, n)| (id, f + first, n)));
+            }
+            None => {
+                let mut b = extra;
+                b.name = "Topography".to_string();
+                batches.insert("Topography", b);
+            }
+        }
+    }
     tick("saved join");
     if std::env::var_os("RVT_MESH_STATS").is_some() {
         eprintln!("instances: {n_family} with family geometry, {n_box} as box");
