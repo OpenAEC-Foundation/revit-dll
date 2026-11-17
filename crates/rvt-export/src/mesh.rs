@@ -2810,7 +2810,7 @@ fn scene_in<'s, 'e>(doc: &'e Document, sc: &'s std::thread::Scope<'s, 'e>) -> Sc
         })
         .collect();
     // Family chains whose forms are all voids (each marked void, none unknown): the family only
-    // cuts its host and has nothing of its own to draw, so it gets no box (open-3d-viewer issue
+    // cuts its host and has nothing of its own to draw, so it gets no box (open-bim-suite issue
     // #24: a void family cutting the terrain was drawn as a solid grey block)
     let void_only_chains: std::collections::HashSet<(String, usize)> = {
         let flags = chain_solids
