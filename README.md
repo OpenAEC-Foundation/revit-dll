@@ -1,4 +1,4 @@
-# rvt-dll
+# revit-dll
 
 Native library (DLL) that reads Autodesk Revit `.rvt` files without Revit, for use by
 [Open BIM Studio](https://github.com/OpenAEC-Foundation/open-bim-studio) and other tools.
