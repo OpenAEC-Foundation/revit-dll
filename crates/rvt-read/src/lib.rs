@@ -7,6 +7,7 @@ mod families;
 mod groups;
 mod hosted;
 mod instances;
+pub mod joins;
 mod levels;
 mod mep;
 pub mod objects;
