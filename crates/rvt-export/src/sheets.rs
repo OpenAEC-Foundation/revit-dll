@@ -269,4 +269,18 @@ mod tests {
         let [lo, hi] = plan.rect.unwrap().map(|p| p.map(|x| x * 304.8));
         assert!(lo[0] > -1189.0 && hi[0] < 0.0 && lo[1] > 0.0 && hi[1] < 841.0, "{lo:?} {hi:?}");
     }
+
+    /// With `RVT_DRAWINGS=<a project with an image in a title block>`: the title blocks give their
+    /// images (`rvt_read::images`).
+    #[test]
+    fn a_title_block_gives_its_image() {
+        let Some(path) = std::env::var_os("RVT_DRAWINGS").map(std::path::PathBuf::from).filter(|p| p.exists()) else { return };
+        let doc = Document::open(&path).expect("rvt");
+        let blocks = sheets(&doc).into_iter().filter_map(|s| s.title_block?.symbol);
+        let images: Vec<_> = blocks.flat_map(|kind| rvt_read::images::images(&doc, kind)).collect();
+        for i in &images {
+            eprintln!("image at {:?}, {:?} m, {} bytes, starts {:02x?}", i.center, i.size, i.file.len(), &i.file[..i.file.len().min(8)]);
+        }
+        assert!(images.iter().any(|i| i.size[0] > 0.0 && i.file.len() > 100), "no image in any title block");
+    }
 }
