@@ -570,4 +570,17 @@ mod tests {
         assert_eq!((&plan.kind, plan.level.map(|l| l.0)), (&ViewKind::FloorPlan, Some(1959)));
         assert!((plan.cut_offset.unwrap() - 1200.0 / 304.8).abs() < 1e-9);
     }
+
+    /// With `RVT_DRAWINGS=<a project with phases>`: its views have a phase and a filter, and
+    /// existing work is overridden in halftone (`rvt_read::phases`).
+    #[test]
+    fn views_have_a_phase_and_a_filter() {
+        let Some(file) = std::env::var_os("RVT_DRAWINGS").map(std::path::PathBuf::from).filter(|p| p.exists()) else { return };
+        let doc = Document::open(&file).expect("rvt");
+        let ids: Vec<u64> = views(&doc).iter().map(|v| v.id).collect();
+        let p = rvt_read::phases::phasing(&doc, &ids);
+        eprintln!("{} elements with a phase, {} views with a phase, halftone {:?}", p.elements.len(), p.views.len(), p.halftone);
+        assert!(!p.elements.is_empty() && !p.views.is_empty());
+        assert!(p.halftone[2], "existing work is overridden in halftone");
+    }
 }
