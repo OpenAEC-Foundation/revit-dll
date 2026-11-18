@@ -4,6 +4,7 @@ mod compound;
 mod curve_elements;
 mod curves;
 mod families;
+pub mod fonts;
 mod groups;
 mod hosted;
 pub mod images;
