@@ -3,8 +3,7 @@
 Native library (DLL) that reads Autodesk Revit `.rvt` files without Revit, for use by
 [Open BIM Studio](https://github.com/OpenAEC-Foundation/open-bim-studio) and other tools.
 
-**Status:** private, pre-alpha. Do not make this repository public without a decision by the
-maintainers (see "Legal" below).
+**Status:** pre-alpha.
 
 ## Scope
 
